@@ -20,7 +20,7 @@ This phase covers the absolute basics needed before any code can be run.
 
 1. **AWS Account:** Sign up at [aws.amazon.com](https://aws.amazon.com/). Note your 12-digit AWS Account ID.
 2. **GitHub Account:** Sign up at [github.com](https://github.com/).
-3. **PagerDuty Account:** Sign up for the [PagerDuty Free plan](https://www.pagerduty.com/). Go through the UI to create a single Service named `Anvil - All Environments`, add an **AWS CloudWatch** integration, and **save the generated Integration URL in a secure password manager**. You will need it in a later step.
+3. **PagerDuty Account:** Sign up for the [PagerDuty Free plan](https://www.pagerduty.com/). Go through the UI to create a single Service named `Anvil - All Environments`, add an **AWS CloudWatch** integration, and **save the generated Integration URL in a secure password manager**. You will need it in a later step. Note: You can't use a gmail.com address for PagerDuty, must be a custom domain, so consider using an email address like `yourname@yourcompany.com`. I use [ProtonMail](https://www.protonmail.com) to facilitate this.
 
 ### 2. Local Workstation Setup
 
@@ -65,70 +65,69 @@ gh repo create $OPS_REPO --private --clone
 This second repository holds the operational configuration files. After cloning the empty `project-anvil-ops` repository, create the following files and directories inside it.
 
 1. **Add Configuration Files:**
+    - **File: `environments/dev.json`**
 
-   - **File: `environments/dev.json`**
+        ```json
+        {
+          "web_instance_type": "t2.micro",
+          "app_instance_type": "t2.micro",
+          "db_instance_class": "db.t3.micro",
+          "web_min_size": 1,
+          "web_max_size": 2,
+          "web_desired_capacity": 1,
+          "app_min_size": 1,
+          "app_max_size": 2,
+          "app_desired_capacity": 1
+        }
+        ```
 
-   ```json
-   {
-     "web_instance_type": "t2.micro",
-     "app_instance_type": "t2.micro",
-     "db_instance_class": "db.t3.micro",
-     "web_min_size": 1,
-     "web_max_size": 2,
-     "web_desired_capacity": 1,
-     "app_min_size": 1,
-     "app_max_size": 2,
-     "app_desired_capacity": 1
-   }
-   ```
+    - **File: `environments/qa.json`**
 
-   - **File: `environments/qa.json`**
+        ```json
+        {
+          "web_instance_type": "t3.small",
+          "app_instance_type": "t3.small",
+          "db_instance_class": "db.t3.micro",
+          "web_min_size": 2,
+          "web_max_size": 4,
+          "web_desired_capacity": 2,
+          "app_min_size": 2,
+          "app_max_size": 4,
+          "app_desired_capacity": 2
+        }
+        ```
 
-   ```json
-   {
-     "web_instance_type": "t3.small",
-     "app_instance_type": "t3.small",
-     "db_instance_class": "db.t3.micro",
-     "web_min_size": 2,
-     "web_max_size": 4,
-     "web_desired_capacity": 2,
-     "app_min_size": 2,
-     "app_max_size": 4,
-     "app_desired_capacity": 2
-   }
-   ```
+    - **File: `environments/uat.json`**
 
-   - **File: `environments/uat.json`**
+        ```json
+        {
+          "web_instance_type": "t3.small",
+          "app_instance_type": "t3.medium",
+          "db_instance_class": "db.t3.small",
+          "web_min_size": 2,
+          "web_max_size": 4,
+          "web_desired_capacity": 2,
+          "app_min_size": 2,
+          "app_max_size": 4,
+          "app_desired_capacity": 2
+        }
+        ```
 
-   ```json
-   {
-     "web_instance_type": "t3.small",
-     "app_instance_type": "t3.medium",
-     "db_instance_class": "db.t3.small",
-     "web_min_size": 2,
-     "web_max_size": 4,
-     "web_desired_capacity": 2,
-     "app_min_size": 2,
-     "app_max_size": 4,
-     "app_desired_capacity": 2
-   }
-   ```
+    - **File: `environments/prod.json`**
 
-   - **File: `environments/prod.json`**
-
-   ```json
-   {
-     "web_instance_type": "t3.medium",
-     "app_instance_type": "t3.large",
-     "db_instance_class": "db.t3.medium",
-     "web_min_size": 2,
-     "web_max_size": 10,
-     "web_desired_capacity": 3,
-     "app_min_size": 3,
-     "app_max_size": 10,
-     "app_desired_capacity": 3
-   }
-   ```
+        ```json
+        {
+          "web_instance_type": "t3.medium",
+          "app_instance_type": "t3.large",
+          "db_instance_class": "db.t3.medium",
+          "web_min_size": 2,
+          "web_max_size": 10,
+          "web_desired_capacity": 3,
+          "app_min_size": 3,
+          "app_max_size": 10,
+          "app_desired_capacity": 3
+        }
+        ```
 
 2. **Add the GitOps Pipeline File:**
 
@@ -181,10 +180,35 @@ This second repository holds the operational configuration files. After cloning 
 
 ```bash
 # === Protect the 'main' branch of the Anvil Repo ===
-gh api -X PUT /repos/$ANVIL_REPO/branches/main/protection -f 'required_status_checks=null' -f 'enforce_admins=true' -f 'required_pull_request_reviews[required_approving_review_count]=1' -F 'restrictions=null' -F 'required_linear_history=true'
+gh api \
+  --method PUT \
+  /repos/$ANVIL_REPO/branches/main/protection \
+  -f 'required_status_checks[strict]=true' \
+  -f 'required_status_checks[contexts][]=placeholder' \
+  -f 'enforce_admins=true' \
+  -F 'required_pull_request_reviews[dismiss_stale_reviews]=true' \
+  -F 'required_pull_request_reviews[require_code_owner_reviews]=true' \
+  -F 'required_pull_request_reviews[required_approving_review_count]=1' \
+  -F 'required_pull_request_reviews[require_last_push_approval]=true' \
+  -F 'restrictions=null' \
+  -F 'required_linear_history=false' \
+  -F 'allow_force_pushes=false' \
+  -F 'allow_deletions=false' \
+  -F 'required_conversation_resolution=true'
 
 # === Protect the 'main' branch of the Ops Repo ===
-gh api -X PUT /repos/$OPS_REPO/branches/main/protection -f 'required_status_checks=null' -f 'enforce_admins=true' -f 'required_pull_request_reviews[required_approving_review_count]=1' -F 'restrictions=null'
+gh api \
+  --method PUT \
+  /repos/$OPS_REPO/branches/main/protection \
+  -f 'required_status_checks=null' \
+  -f 'enforce_admins=true' \
+  -F 'required_pull_request_reviews[dismiss_stale_reviews]=true' \
+  -F 'required_pull_request_reviews[required_approving_review_count]=1' \
+  -F 'restrictions=null' \
+  -F 'required_linear_history=true' \
+  -F 'allow_force_pushes=false' \
+  -F 'allow_deletions=false' \
+  -F 'required_conversation_resolution=true'
 
 # === Protect the Environments in the Anvil Repo ===
 REVIEWER_ID=$(gh api /users/$REVIEWER_USERNAME --jq .id)
