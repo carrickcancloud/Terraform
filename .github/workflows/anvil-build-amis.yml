@@ -1,26 +1,23 @@
 # This CI/CD pipeline is the "AMI Factory" for Project Anvil.
-# It automatically builds Golden AMIs for the application, tags them with the
-# Git commit hash, and stores their IDs in AWS SSM Parameter Store.
+# It builds environment-specific Golden AMIs, scans them for vulnerabilities,
+# uploads reports to an isolated S3 bucket, and stores the final AMI IDs in SSM.
 
-name: 'Anvil: Build Golden AMIs'
+name: 'Anvil: Build Golden AMIs (Interactive)'
 
 on:
   # Allow manual triggering from the GitHub UI's "Actions" tab.
   workflow_dispatch:
+    inputs:
+      target_environment:
+        description: 'The target environment for this build (determines vulnerability report destination)'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - uat
+          - prod
 
-  # Trigger automatically on a push to the main branch...
-  push:
-    branches:
-      - main
-    # ...but ONLY if files relevant to the application or AMI build have changed.
-    paths:
-      - 'anvil/packer/**'
-      - 'anvil/scripts/**'
-      - 'anvil/.wp-version'
-      # In a real project, you would also add the path to your app source code, e.g.:
-      # - 'anvil/wordpress-theme/**'
-
-# Grant the necessary permissions for keyless OIDC authentication with AWS.
 permissions:
   id-token: write
   contents: read
@@ -52,7 +49,7 @@ jobs:
 
   # This job builds the Web and App AMIs in parallel after packaging is complete.
   build-and-store-amis:
-    name: '2. Build & Store AMIs'
+    name: '2. Build, Scan & Store AMIs'
     needs: package-application # This job depends on the packaging job succeeding.
     runs-on: ubuntu-latest
 
@@ -91,6 +88,9 @@ jobs:
 
       - name: 'Build AMI for ${{ matrix.tier }} Tier'
         id: build
+        env:
+          # This passes the user's environment choice as a variable to Packer
+          PKR_VAR_target_env: ${{ github.event.inputs.target_environment }}
         run: |
           # Run the correct Packer build based on the matrix tier (web or app).
           PACKER_LOG=1 packer build -machine-readable packer/${{ matrix.tier }}-server.pkr.hcl > packer-output.log
@@ -120,5 +120,5 @@ jobs:
             --name "$SSM_PARAMETER_NAME" \
             --value "${{ env.AMI_ID }}" \
             --type "String" \
-            --description "Golden AMI for ${{ matrix.tier }} tier, built from commit $GIT_HASH" \
+            --description "Golden AMI for ${{ matrix.tier }} tier, built from commit $GIT_HASH for the ${{ github.event.inputs.target_environment }} environment" \
             --overwrite

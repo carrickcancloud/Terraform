@@ -133,40 +133,8 @@ variable "app_desired_capacity" {
   type        = number
 }
 
-variable "instance_types_by_env" {
-  description = "A nested map of EC2 instance types, keyed by environment and then by server tier."
-  type        = map(map(string))
-  default = {
-    "default" = { web = "t2.micro", app = "t2.micro" },
-    "dev"     = { web = "t2.micro", app = "t2.micro" },
-    "qa"      = { web = "t3.small", app = "t3.small" },
-    "uat"     = { web = "t3.small", app = "t3.medium" },
-    "prod"    = { web = "t3.medium", app = "t3.large" }
-  }
-}
-
-variable "db_instance_class_by_env" {
-  description = "A map of RDS instance classes, keyed by environment."
-  type        = map(string)
-  default = {
-    "default" = "db.t3.micro", "dev" = "db.t3.micro", "qa" = "db.t3.micro",
-    "uat"     = "db.t3.small", "prod" = "db.t3.medium"
-  }
-}
-
 variable "db_multi_az" {
   description = "Set to true to deploy the RDS database in a Multi-AZ configuration."
   type        = bool
   default     = true
-}
-
-# +-------------------------------------+
-# |     External Service Variables      |
-# +-------------------------------------+
-
-variable "pagerduty_integration_url" {
-  description = "The PagerDuty integration URL for the alerting SNS topic. Required if provider is 'pagerduty'."
-  type        = string
-  sensitive   = true
-  default     = null
 }

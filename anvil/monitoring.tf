@@ -33,12 +33,35 @@ resource "aws_sns_topic" "alarms" {
 
 # Subscribes the PagerDuty integration endpoint to the SNS topic.
 resource "aws_sns_topic_subscription" "pagerduty_alert" {
-  count = var.alerting_provider == "pagerduty" && var.pagerduty_integration_url != null ? 1 : 0
+  # This resource is only created if PagerDuty is the alerting provider.
+  # The endpoint URL is now fetched securely from AWS Secrets Manager.
+  count = var.alerting_provider == "pagerduty" ? 1 : 0
 
   topic_arn              = aws_sns_topic.alarms.arn
   protocol               = "https"
-  endpoint               = var.pagerduty_integration_url
+  endpoint               = data.aws_secretsmanager_secret_version.pagerduty[0].secret_string
   endpoint_auto_confirms = true
+}
+
+# +------------------------------------------+
+# |        Cost Monitoring (FinOps)          |
+# +------------------------------------------+
+
+resource "aws_budgets_budget" "monthly_total" {
+  name         = "Monthly-Total-Spend"
+  budget_type  = "COST"
+  limit_amount = "100.0" # IMPORTANT: Change this to your expected monthly budget
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+
+  # Creates a notification that triggers when the forecasted cost exceeds 80% of the budget.
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 80
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "FORECASTED"
+    subscriber_sns_topic_arns = [aws_sns_topic.alarms.arn]
+  }
 }
 
 # +------------------------------------------+
@@ -91,6 +114,23 @@ resource "aws_cloudwatch_metric_alarm" "web_latency_warning" {
   period              = 300
   statistic           = "p95"
   threshold           = 1.0
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+  dimensions = {
+    LoadBalancer = module.web_tier.load_balancer_name
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "web_slo_latency_burn" {
+  alarm_name          = "${local.name_prefix} [SLO WARNING] Web Tier - Latency SLO Burn"
+  alarm_description   = "WARNING: The p95 latency has exceeded the 500ms SLO target, burning our monthly error budget."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  metric_name         = "TargetResponseTime"
+  namespace           = "AWS/ApplicationELB"
+  period              = 300
+  statistic           = "p95"
+  threshold           = 0.5 # SLO is 500ms
   alarm_actions       = [aws_sns_topic.alarms.arn]
   ok_actions          = [aws_sns_topic.alarms.arn]
   dimensions = {

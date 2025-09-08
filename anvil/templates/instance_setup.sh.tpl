@@ -19,6 +19,7 @@ DB_NAME="${db_name}"           # Only for app tier
 DB_USERNAME="${db_username}"   # Only for app tier
 XRAY_ENABLED="${xray_enabled}" # Boolean 'true' or 'false'
 DB_PASSWORD_SECRET_ARN="${db_password_secret_arn}" # Only for app tier
+WP_SALTS_SECRET_ARN="${wp_salts_secret_arn}" # Only for app tier
 # RUM_APP_MONITOR_SCRIPT="${rum_app_monitor_script}" # For future RUM integration (JS snippet)
 
 # --- Constants ---
@@ -159,6 +160,13 @@ configure_wordpress() {
   log_message "Fetching DB password from Secrets Manager ARN: $DB_PASSWORD_SECRET_ARN"
   DB_PASSWORD_ACTUAL=$(aws secretsmanager get-secret-value --secret-id "$DB_PASSWORD_SECRET_ARN" --query 'SecretString' --output text --region "$AWS_REGION" | jq -r .password)
 
+  # Fetch WordPress salts securely from AWS Secrets Manager
+  log_message "Fetching WordPress salts from Secrets Manager ARN: $WP_SALTS_SECRET_ARN"
+  WP_SALTS_JSON=$(aws secretsmanager get-secret-value --secret-id "$WP_SALTS_SECRET_ARN" --query 'SecretString' --output text --region "$AWS_REGION")
+
+  # Generate the salt define() statements from the fetched JSON
+  SALT_DEFINES=$(echo "$WP_SALTS_JSON" | jq -r 'to_entries | .[] | "define( \u0027\(.key)\u0027, \u0027\(.value|gsub("\u0027"; "\\\u0027"))\u0027 );"')
+
   cat > "$WORDPRESS_CONFIG_FILE" << EOF
 <?php
 // ** MySQL settings - Provided by Terraform and Secrets Manager ** //
@@ -179,16 +187,8 @@ define('W3TC_CACHE_DATABASE_METHOD', 'apc');
 define('W3TC_CACHE_OBJECT_ENABLE', true);
 define('W3TC_CACHE_OBJECT_METHOD', 'apc');
 
-// Unique Authentication Unique Keys and Salts.
-// In production, these should be securely generated at deploy time (e.g., from Systems Manager)
-define( 'AUTH_KEY',         'put your unique phrase here' );
-define( 'SECURE_AUTH_KEY',  'put your unique phrase here' );
-define( 'LOGGED_IN_KEY',    'put your unique phrase here' );
-define( 'NONCE_KEY',        'put your unique phrase here' );
-define( 'AUTH_SALT',        'put your unique phrase here' );
-define( 'SECURE_AUTH_SALT', 'put your unique phrase here' );
-define( 'LOGGED_IN_SALT',   'put your unique phrase here' );
-define( 'NONCE_SALT',       'put your unique phrase here' );
+// ** Authentication Unique Keys and Salts - Provided by Secrets Manager ** //
+$SALT_DEFINES
 
 /**
  * The base path for WordPress.

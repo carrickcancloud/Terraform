@@ -1,1 +1,7 @@
-key = "prod/terraform.tfstate"
+# This file provides the dynamic backend configuration for the 'prod' environment.
+# The CI/CD pipeline passes this file to the `terraform init` command using the
+# `-backend-config` flag to specify which S3 bucket and key to use for storing
+# this environment's state.
+
+bucket = "acmelabs-terraform-state-prod"
+key    = "terraform.tfstate"

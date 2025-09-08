@@ -1,5 +1,5 @@
 # This file defines all shared security resources for the project,
-# including network firewalls (Security Groups) and permissions (IAM Roles).
+# including network firewalls (Security Groups), permissions (IAM Roles), and secret containers.
 
 # +--------------------------------+
 # |        Security Groups         |
@@ -160,7 +160,7 @@ resource "aws_iam_instance_profile" "ec2_profile" {
 
 # --- Roles for Log Archiving Pipeline ---
 
-# This IAM Role allows CloudWatch Logs to send data to Kinesis Firehose.
+# This IAM Role allows CloudWatch Logs to send data to a Kinesis Firehose.
 # It will only be created if the logging_provider is set to 'aws_s3_firehose'.
 resource "aws_iam_role" "logs_to_firehose_role" {
   count = var.logging_provider == "aws_s3_firehose" ? 1 : 0
@@ -190,4 +190,26 @@ resource "aws_iam_role" "firehose_to_s3_role" {
       Principal = { Service = "firehose.amazonaws.com" }
     }]
   })
+}
+
+# +------------------------------------------+
+# |        Secrets Manager Containers        |
+# +------------------------------------------+
+
+# Secret container for the PagerDuty integration URL.
+# The value for this secret must be populated manually in the AWS Console once.
+resource "aws_secretsmanager_secret" "pagerduty" {
+  count = var.alerting_provider == "pagerduty" ? 1 : 0
+
+  name        = "${local.name_prefix}-pagerduty-url"
+  description = "Stores the PagerDuty integration URL for SNS."
+  tags        = local.common_tags
+}
+
+# Secret container for the WordPress authentication salts.
+# This will be populated dynamically by a resource in main.tf.
+resource "aws_secretsmanager_secret" "wp_salts" {
+  name        = "${local.name_prefix}-wordpress-salts"
+  description = "Stores the authentication unique keys and salts for WordPress."
+  tags        = local.common_tags
 }

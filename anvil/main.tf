@@ -2,8 +2,16 @@
 # values, and calls all the child modules to build the complete infrastructure.
 
 provider "aws" {
-  region  = var.aws_region
-  profile = "tf"
+  region = var.aws_region
+}
+
+terraform {
+  required_providers {
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.4"
+    }
+  }
 }
 
 # Defines a set of reusable local values for naming, tagging, and IP management.
@@ -43,7 +51,7 @@ locals {
     cidrsubnet(cidrsubnet(local.vpc_cidr, 4, i), 4, local.tier_cidrs["db"])
   ]
 
-  # --- Pluggable Database Interface ---
+  # --- Pluggable Database Interface ---\
   database_config = {
     endpoint = var.database_provider == "aws_rds" ? module.rds[0].db_instance_endpoint : null
     port     = var.database_provider == "aws_rds" ? module.rds[0].db_instance_port : null
@@ -72,6 +80,57 @@ data "aws_ssm_parameter" "app_ami" {
 
 # Looks up the current AWS Account ID for use in IAM Policies.
 data "aws_caller_identity" "current" {}
+
+# Looks up the PagerDuty Integration URL from Secrets Manager at apply time.
+data "aws_secretsmanager_secret_version" "pagerduty" {
+  # This data source will only be read if PagerDuty is the selected provider.
+  count = var.alerting_provider == "pagerduty" ? 1 : 0
+
+  secret_id = aws_secretsmanager_secret.pagerduty[0].id
+}
+
+# Read operational configurations from SSM Parameter Store at apply time.
+data "aws_ssm_parameter" "ssm_web_instance_type" {
+  name = "/anvil/${terraform.workspace}/web_instance_type"
+}
+
+data "aws_ssm_parameter" "ssm_app_instance_type" {
+  name = "/anvil/${terraform.workspace}/app_instance_type"
+}
+
+data "aws_ssm_parameter" "ssm_db_instance_class" {
+  count = var.database_provider == "aws_rds" ? 1 : 0
+  name  = "/anvil/${terraform.workspace}/db_instance_class"
+}
+
+# +------------------------------------------+
+# |           Secrets Management             |
+# +------------------------------------------+
+
+# Generate 8 random strings for the WordPress salts.
+resource "random_string" "wp_salt" {
+  count   = 8
+  length  = 64
+  special = true
+  # Add extra special characters to ensure high entropy.
+  override_special = "!@#$%^&*()-_=+[]{}|;:,.<>/?~"
+}
+
+# Populate the WordPress salts secret with the generated random values.
+# This runs on every apply, ensuring the salts are always fresh for new instances.
+resource "aws_secretsmanager_secret_version" "wp_salts_values" {
+  secret_id = aws_secretsmanager_secret.wp_salts.id
+  secret_string = jsonencode({
+    AUTH_KEY         = random_string.wp_salt[0].result
+    SECURE_AUTH_KEY  = random_string.wp_salt[1].result
+    LOGGED_IN_KEY    = random_string.wp_salt[2].result
+    NONCE_KEY        = random_string.wp_salt[3].result
+    AUTH_SALT        = random_string.wp_salt[4].result
+    SECURE_AUTH_SALT = random_string.wp_salt[5].result
+    LOGGED_IN_SALT   = random_string.wp_salt[6].result
+    NONCE_SALT       = random_string.wp_salt[7].result
+  })
+}
 
 # +------------------------------------------+
 # |          Foundational Modules            |
@@ -259,6 +318,25 @@ resource "aws_iam_role_policy_attachment" "db_secret_read_attach" {
   policy_arn = aws_iam_policy.db_secret_read_policy[0].arn
 }
 
+# --- Policy to Read WordPress Salts Secret ---
+resource "aws_iam_policy" "wp_salts_read_policy" {
+  name   = "${local.name_prefix}-wp-salts-read-policy"
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect   = "Allow",
+      Action   = "secretsmanager:GetSecretValue",
+      Resource = aws_secretsmanager_secret.wp_salts.arn
+    }]
+  })
+}
+
+# Attaches the WordPress Salts read policy to the shared EC2 instance role.
+resource "aws_iam_role_policy_attachment" "wp_salts_read_attach" {
+  role       = aws_iam_role.instance_role.name
+  policy_arn = aws_iam_policy.wp_salts_read_policy.arn
+}
+
 # Deploys the RDS database for the application's data tier.
 module "rds" {
   count  = var.database_provider == "aws_rds" ? 1 : 0
@@ -267,7 +345,7 @@ module "rds" {
   name_prefix            = "${local.name_prefix}-db"
   vpc_id                 = module.vpc.vpc_id
   db_subnet_ids          = module.vpc.db_subnet_ids
-  db_instance_class      = var.db_instance_class_by_env[terraform.workspace]
+  db_instance_class      = data.aws_ssm_parameter.ssm_db_instance_class[0].value
   db_name                = "${var.cms_name}_${terraform.workspace}"
   db_username            = "dbadmin"
   vpc_security_group_ids = [aws_security_group.db_tier.id]
@@ -316,7 +394,7 @@ module "web_tier" {
   min_size                  = var.web_min_size
   max_size                  = var.web_max_size
   desired_capacity          = var.web_desired_capacity
-  instance_type             = var.instance_types_by_env[terraform.workspace]["web"]
+  instance_type             = data.aws_ssm_parameter.ssm_web_instance_type.value
   ami_id                    = data.aws_ssm_parameter.web_ami.value
   key_name                  = var.key_name
   iam_instance_profile_name = aws_iam_instance_profile.ec2_profile.name
@@ -333,12 +411,13 @@ module "web_tier" {
     cms_version               = var.cms_version,
     env                       = terraform.workspace,
     domain_name               = var.domain_name,
-    app_tier_dns              = module.app_tier.load_balancer_dns_name, # Pass App Tier DNS for internal comms
+    app_tier_dns              = module.app_tier.load_balancer_dns_name,
     db_endpoint               = local.database_config.endpoint,
     db_port                   = local.database_config.port,
     db_name                   = local.database_config.name,
     db_username               = local.database_config.username,
     db_password_secret_arn    = var.database_provider == "aws_rds" ? module.rds[0].db_password_secret_arn : "",
+    wp_salts_secret_arn       = aws_secretsmanager_secret.wp_salts.arn,
     xray_enabled              = var.apm_provider == "aws_xray" ? true : false
   }))
 
@@ -358,7 +437,7 @@ module "app_tier" {
   min_size                  = var.app_min_size
   max_size                  = var.app_max_size
   desired_capacity          = var.app_desired_capacity
-  instance_type             = var.instance_types_by_env[terraform.workspace]["app"]
+  instance_type             = data.aws_ssm_parameter.ssm_app_instance_type.value
   ami_id                    = data.aws_ssm_parameter.app_ami.value
   key_name                  = var.key_name
   iam_instance_profile_name = aws_iam_instance_profile.ec2_profile.name
@@ -381,6 +460,7 @@ module "app_tier" {
     db_name                   = local.database_config.name,
     db_username               = local.database_config.username,
     db_password_secret_arn    = var.database_provider == "aws_rds" ? module.rds[0].db_password_secret_arn : "",
+    wp_salts_secret_arn       = aws_secretsmanager_secret.wp_salts.arn,
     xray_enabled              = var.apm_provider == "aws_xray" ? true : false
   }))
 
