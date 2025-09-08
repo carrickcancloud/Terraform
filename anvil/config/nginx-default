@@ -1,0 +1,53 @@
+# This configuration file will be baked into the Web Server AMI.
+# It is designed to work with the instance_setup.sh user data script.
+
+server {
+    listen 80;
+    server_name _;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name _;
+
+    # These certificate paths are placeholders. The instance_setup.sh script
+    # will generate the actual certificates and place them here. Nginx will
+    # fail to start until that script runs successfully on first boot.
+    ssl_certificate /etc/ssl/acme_internal/cert.pem;
+    ssl_certificate_key /etc/ssl/acme_internal/private/privkey.pem;
+
+    # Standard security and performance settings
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
+    # The root for static files served directly by the web tier.
+    root /var/www/html;
+    index index.php index.html index.htm;
+
+    # Location block for static assets. This tells Nginx to serve files from
+    # the local disk if they exist under /wp-content/.
+    location /wp-content/ {
+        try_files $uri $uri/ =404;
+    }
+
+    # Location block for all other requests.
+    location / {
+        # This proxy_pass directive is the key to the 3-tier architecture.
+        # It forwards all dynamic requests to the internal Application Load Balancer
+        # of the App Tier. The ${app_tier_dns} variable is a placeholder that
+        # should be replaced by a startup script if needed, but in our case, we
+        # will configure this dynamically.
+        
+        # We will use a variable that can be set by the startup script
+        set $app_tier_alb ""; # This will be set dynamically by instance_setup.sh.tpl
+        proxy_pass https://$app_tier_alb;
+        
+        # Forward necessary headers to the backend
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
