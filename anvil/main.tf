@@ -51,7 +51,7 @@ locals {
     cidrsubnet(cidrsubnet(local.vpc_cidr, 4, i), 4, local.tier_cidrs["db"])
   ]
 
-  # --- Pluggable Database Interface ---\
+  # --- Pluggable Database Interface ---
   database_config = {
     endpoint = var.database_provider == "aws_rds" ? module.rds[0].db_instance_endpoint : null
     port     = var.database_provider == "aws_rds" ? module.rds[0].db_instance_port : null
@@ -101,6 +101,30 @@ data "aws_ssm_parameter" "ssm_app_instance_type" {
 data "aws_ssm_parameter" "ssm_db_instance_class" {
   count = var.database_provider == "aws_rds" ? 1 : 0
   name  = "/anvil/${terraform.workspace}/db_instance_class"
+}
+
+data "aws_ssm_parameter" "ssm_web_min_size" {
+  name = "/anvil/${terraform.workspace}/web_min_size"
+}
+
+data "aws_ssm_parameter" "ssm_web_max_size" {
+  name = "/anvil/${terraform.workspace}/web_max_size"
+}
+
+data "aws_ssm_parameter" "ssm_web_desired_capacity" {
+  name = "/anvil/${terraform.workspace}/web_desired_capacity"
+}
+
+data "aws_ssm_parameter" "ssm_app_min_size" {
+  name = "/anvil/${terraform.workspace}/app_min_size"
+}
+
+data "aws_ssm_parameter" "ssm_app_max_size" {
+  name = "/anvil/${terraform.workspace}/app_max_size"
+}
+
+data "aws_ssm_parameter" "ssm_app_desired_capacity" {
+  name = "/anvil/${terraform.workspace}/app_desired_capacity"
 }
 
 # +------------------------------------------+
@@ -391,9 +415,9 @@ module "web_tier" {
   common_tags               = local.common_tags
   lb_subnet_ids             = module.vpc.public_subnet_cidrs
   s3_bucket_for_logs        = module.s3.bucket_name
-  min_size                  = var.web_min_size
-  max_size                  = var.web_max_size
-  desired_capacity          = var.web_desired_capacity
+  min_size                  = data.aws_ssm_parameter.ssm_web_min_size.value
+  max_size                  = data.aws_ssm_parameter.ssm_web_max_size.value
+  desired_capacity          = data.aws_ssm_parameter.ssm_web_desired_capacity.value
   instance_type             = data.aws_ssm_parameter.ssm_web_instance_type.value
   ami_id                    = data.aws_ssm_parameter.web_ami.value
   key_name                  = var.key_name
@@ -434,9 +458,9 @@ module "app_tier" {
   common_tags               = local.common_tags
   lb_subnet_ids             = module.vpc.private_subnet_cidrs
   s3_bucket_for_logs        = module.s3.bucket_name
-  min_size                  = var.app_min_size
-  max_size                  = var.app_max_size
-  desired_capacity          = var.app_desired_capacity
+  min_size                  = data.aws_ssm_parameter.ssm_app_min_size.value
+  max_size                  = data.aws_ssm_parameter.ssm_app_max_size.value
+  desired_capacity          = data.aws_ssm_parameter.ssm_app_desired_capacity.value
   instance_type             = data.aws_ssm_parameter.ssm_app_instance_type.value
   ami_id                    = data.aws_ssm_parameter.app_ami.value
   key_name                  = var.key_name

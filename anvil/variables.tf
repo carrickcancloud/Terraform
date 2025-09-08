@@ -107,32 +107,6 @@ variable "ami_version" {
 # |         Application Fleet           |
 # +-------------------------------------+
 
-variable "web_min_size" {
-  description = "The minimum number of web server instances."
-  type        = number
-}
-variable "web_max_size" {
-  description = "The maximum number of web server instances."
-  type        = number
-}
-variable "web_desired_capacity" {
-  description = "The desired number of web server instances to start with."
-  type        = number
-}
-
-variable "app_min_size" {
-  description = "The minimum number of application server instances."
-  type        = number
-}
-variable "app_max_size" {
-  description = "The maximum number of application server instances."
-  type        = number
-}
-variable "app_desired_capacity" {
-  description = "The desired number of application server instances to start with."
-  type        = number
-}
-
 variable "db_multi_az" {
   description = "Set to true to deploy the RDS database in a Multi-AZ configuration."
   type        = bool
