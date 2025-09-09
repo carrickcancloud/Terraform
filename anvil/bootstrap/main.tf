@@ -59,10 +59,12 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "terraform_state" 
   }
 }
 
-# --- Shared Terraform State Lock Table ---
+# --- Per-Environment Terraform State Lock Tables ---
 
 resource "aws_dynamodb_table" "terraform_locks" {
-  name         = "acmelabs-terraform-lock-table"
+  for_each = toset(var.environments) # Added for_each here
+
+  name         = "acmelabs-terraform-lock-table-${each.key}" # Dynamic name for each environment
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "LockID"
 
@@ -73,6 +75,11 @@ resource "aws_dynamodb_table" "terraform_locks" {
 
   lifecycle {
     prevent_destroy = true
+  }
+
+  tags = { # Added tags for better organization
+    Environment = each.key
+    ManagedBy   = "Terraform-Bootstrap"
   }
 }
 

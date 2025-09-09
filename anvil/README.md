@@ -282,7 +282,7 @@ Follow this exact sequence to bring an environment online from scratch.
 
 ### **Step 1: Run the Bootstrap Pipeline**
 
-This prepares the AWS account with foundational resources.
+This prepares the AWS account with foundational resources, including per-environment S3 buckets for Terraform state and **dedicated DynamoDB tables for state locking.**
 
 - In the `project-anvil` repo, go to **Actions** -> **"Anvil: Bootstrap Foundational Infrastructure"**.
 - Run the workflow. Download and save the `ssh-private-keys.zip` artifact securely.

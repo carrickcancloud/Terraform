@@ -22,6 +22,5 @@ terraform {
     # the 'config/' directory. This makes the configuration dynamic per environment.
     region         = "us-east-1"
     encrypt        = true
-    dynamodb_table = "acmelabs-terraform-lock-table"
   }
 }

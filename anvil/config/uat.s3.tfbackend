@@ -3,5 +3,6 @@
 # `-backend-config` flag to specify which S3 bucket and key to use for storing
 # this environment's state.
 
-bucket = "acmelabs-terraform-state-uat"
-key    = "terraform.tfstate"
+bucket         = "acmelabs-terraform-state-uat"
+key            = "terraform.tfstate"
+dynamodb_table = "acmelabs-terraform-lock-table-uat"
