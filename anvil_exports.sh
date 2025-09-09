@@ -1,0 +1,9 @@
+#~/bin/bash
+
+echo $GITHUB_ORG
+echo $ANVIL_REPO_NAME
+echo $OPS_REPO_NAME
+echo $ANVIL_REPO
+echo $OPS_REPO
+echo $REVIEWER_USERNAME
+

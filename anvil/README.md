@@ -40,6 +40,17 @@ This phase covers the absolute basics needed before any code can be run.
     - Create an IAM User in the AWS Console with an access key for administrative access.
     - Run `aws configure --profile anvil-admin` to set up your credentials.
     - Run `gh auth login` to authenticate with GitHub.
+        - When prompted for authentication method, you can typically choose **"Login with a web browser"** for simplicity. This will open a browser tab to authorize `gh` CLI access.
+        - **Alternatively, for more granular control (recommended for production or long-term use), you can create a Personal Access Token (PAT):**
+            - Go to **GitHub.com > Settings > Developer settings > Personal access tokens > Fine-grained tokens**.
+            - Generate a new token with at least:
+              - `Actions` (Read and write)
+              - `Administration` (Read and write)
+              - `Contents` (Read and write)
+              - `Environments` (Read and write)
+              - `Secrets` (Read and write)
+            - Repository permissions, scoped to the repositories you'll create or "All repositories."
+            - When running `gh auth login`, choose "Paste your authentication token" and paste your PAT.
 
 ---
 
@@ -51,9 +62,7 @@ This phase uses CLI commands to configure your repositories and prepare AWS.
 
 ```bash
 # === Set Environment Variables (run this first) ===
-# IMPORTANT: If using a personal GitHub account instead of an Organization,
-# set GITHUB_ORG to your GitHub username (e.g., "your-github-username").
-export GITHUB_ORG="acme-corp" # Your GitHub Organization name or personal username
+export GITHUB_ORG="acme-corp" # Your GitHub Organization name
 export ANVIL_REPO_NAME="project-anvil"
 export OPS_REPO_NAME="project-anvil-ops"
 export ANVIL_REPO="$GITHUB_ORG/$ANVIL_REPO_NAME"
