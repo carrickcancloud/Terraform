@@ -53,7 +53,6 @@ output "database_name" {
   value       = local.database_config.name
 }
 
-
 # +-------------------------------------+
 # |          Storage Outputs            |
 # +-------------------------------------+
