@@ -20,7 +20,14 @@ This phase covers the absolute basics needed before any code can be run.
 
 1. **AWS Account:** Sign up at [aws.amazon.com](https://aws.amazon.com/). Note your 12-digit AWS Account ID.
 2. **GitHub Account:** Sign up at [github.com](https://github.com/).
-3. **PagerDuty Account:** Sign up for the [PagerDuty Free plan](https://www.pagerduty.com/). Go through the UI to create a single Service named `Anvil - All Environments`, add an **AWS CloudWatch** integration, and **save the generated Integration URL in a secure password manager**. You will need it in a later step. Note: You can't use a gmail.com address for PagerDuty, must be a custom domain, so consider using an email address like `yourname@yourcompany.com`. I use [ProtonMail](https://www.protonmail.com) to facilitate this.
+3. **GitHub Organization:**
+    The `GITHUB_ORG` variable in **Phase II: Repository & AWS Prerequisite Setup (CLI)** defaults to `acme-corp`.
+    ***If you intend to use this default or any other GitHub Organization** for your repositories (recommended for team projects), you **must create it now**. Your personal account will automatically be an owner.
+        - Go to your [Organizations page on GitHub](https://github.com/organizations/new).
+        - Choose the **Free** plan.
+        - Provide the organization name (e.g., `acme-corp`) and follow the prompts.
+    - **Alternatively, if you prefer to use your personal GitHub account** for the repositories, you can use your GitHub username for the `GITHUB_ORG` variable in **Phase II** and skip creating an organization.
+4. **PagerDuty Account:** Sign up for the [PagerDuty Free plan](https://www.pagerduty.com/). Go through the UI to create a single Service named `Anvil - All Environments`, add an **AWS CloudWatch** integration, and **save the generated Integration URL in a secure password manager**. You will need it in a later step. Note: You can't use a gmail.com address for PagerDuty, must be a custom domain, so consider using an email address like `yourname@yourcompany.com`. I use [ProtonMail](https://www.protonMail.com) to facilitate this.
 
 ### 2. Local Workstation Setup
 
@@ -44,7 +51,9 @@ This phase uses CLI commands to configure your repositories and prepare AWS.
 
 ```bash
 # === Set Environment Variables (run this first) ===
-export GITHUB_ORG="acme-corp" # Your GitHub Organization name
+# IMPORTANT: If using a personal GitHub account instead of an Organization,
+# set GITHUB_ORG to your GitHub username (e.g., "your-github-username").
+export GITHUB_ORG="acme-corp" # Your GitHub Organization name or personal username
 export ANVIL_REPO_NAME="project-anvil"
 export OPS_REPO_NAME="project-anvil-ops"
 export ANVIL_REPO="$GITHUB_ORG/$ANVIL_REPO_NAME"
