@@ -20,13 +20,22 @@ This phase covers the absolute basics needed before any code can be run.
 
 1. **AWS Account:** Sign up at [aws.amazon.com](https://aws.amazon.com/). Note your 12-digit AWS Account ID.
 2. **GitHub Account:** Sign up at [github.com](https://github.com/).
-3. **GitHub Organization:**
-    The `GITHUB_ORG` variable in **Phase II: Repository & AWS Prerequisite Setup (CLI)** defaults to `acme-corp`.
-    ***If you intend to use this default or any other GitHub Organization** for your repositories (recommended for team projects), you **must create it now**. Your personal account will automatically be an owner.
-        - Go to your [Organizations page on GitHub](https://github.com/organizations/new).
-        - Choose the **Free** plan.
-        - Provide the organization name (e.g., `acme-corp`) and follow the prompts.
-    - **Alternatively, if you prefer to use your personal GitHub account** for the repositories, you can use your GitHub username for the `GITHUB_ORG` variable in **Phase II** and skip creating an organization.
+3. **GitHub Repository Setup Choice:**
+    Choose one of the following options based on your GitHub plan and project goals. The `GITHUB_ORG` variable in **Phase II: Repository & AWS Prerequisite Setup (CLI)** will depend on your choice.
+
+    - **Option A: Free GitHub Account for Lab/Learning (Public Repositories)**
+        This option allows you to experience all the advanced GitHub features (like branch protection rules and deployment environments) on a **free personal GitHub account** by using **public repositories**. This is ideal for learning and experimentation without any cost.
+        - Set the `GITHUB_ORG` variable in **Phase II** to your **personal GitHub username** (e.g., `your-github-username`).
+        - **NOTE:** Public repositories are suitable for lab/learning environments. **In real-world production, Infrastructure-as-Code (IaC) should always be in private repositories** due to its sensitive nature.
+
+    - **Option B: Paid GitHub Plan for Real-World Best Practices (Private Repositories)**
+        This option enables true real-world best practices by using private repositories with advanced GitHub features (branch protection, deployment environments).
+        - This guide assumes you will upgrade your GitHub plan. For a single user, this means subscribing to the **GitHub Team plan (1 seat, paid monthly)** for your organization.
+        - You **must create a GitHub Organization** now. Your personal account will automatically be an owner.
+            - Go to your [Organizations page on GitHub](https://www.github.com/organizations/new).
+            - Choose the **Team** plan (or upgrade from Free).
+            - Provide the organization name (e.g., `acme-corp`) and follow the prompts.
+        - Set the `GITHUB_ORG` variable in **Phase II** to your **Organization's name** (e.g., `acme-corp`).
 4. **PagerDuty Account:** Sign up for the [PagerDuty Free plan](https://www.pagerduty.com/). Go through the UI to create a single Service named `Anvil - All Environments`, add an **AWS CloudWatch** integration, and **save the generated Integration URL in a secure password manager**. You will need it in a later step. Note: You can't use a gmail.com address for PagerDuty, must be a custom domain, so consider using an email address like `yourname@yourcompany.com`. I use [ProtonMail](https://www.protonMail.com) to facilitate this.
 
 ### 2. Local Workstation Setup
@@ -40,17 +49,19 @@ This phase covers the absolute basics needed before any code can be run.
     - Create an IAM User in the AWS Console with an access key for administrative access.
     - Run `aws configure --profile anvil-admin` to set up your credentials.
     - Run `gh auth login` to authenticate with GitHub.
-        - When prompted for authentication method, you can typically choose **"Login with a web browser"** for simplicity. This will open a browser tab to authorize `gh` CLI access.
-        - **Alternatively, for more granular control (recommended for production or long-term use), you can create a Personal Access Token (PAT):**
-            - Go to **GitHub.com > Settings > Developer settings > Personal access tokens > Fine-grained tokens**.
-            - Generate a new token with at least:
-              - `Actions` (Read and write)
-              - `Administration` (Read and write)
-              - `Contents` (Read and write)
-              - `Environments` (Read and write)
-              - `Secrets` (Read and write)
-            - Repository permissions, scoped to the repositories you'll create or "All repositories."
-            - When running `gh auth login`, choose "Paste your authentication token" and paste your PAT.
+        - When prompted for authentication method, choose **"Paste your authentication token"** and use a **Classic Personal Access Token (PAT)**. This is the most reliable method for the `gh` CLI for initial setup.
+            - Go to **GitHub.com > Settings > Developer settings > Personal access tokens > Tokens (classic)**.
+            - Click **"Generate new token (classic)"**.
+            - **Note:** Give it a descriptive name (e.g., "Project Anvil Setup").
+            - **Expiration:** Set an appropriate expiration (e.g., 7 or 30 days).
+            - **Select scopes:** You will need the following scopes:
+                - `repo` (full control of private and public repositories)
+                - `admin:org` (read and write organization and team membership, only if creating repos in an Org)
+                - `workflow` (access GitHub Actions workflows)
+            - Generate token and **immediately copy the token string**.
+            - Paste this token when `gh auth login` prompts you.
+        - **Alternatively, you can try "Login with a web browser"** for simplicity, but if you encounter permission errors during repository creation, you may need to use a PAT as described above.
+        - *(For future reference: Fine-grained Personal Access Tokens offer more granular control and are recommended for production environments. If you wish to use one, ensure it has `Administration`, `Contents`, `Secrets`, `Environments`, `Actions` and `Workflows` permissions all set to `Read and write`.) I recommend using a PAT Classic Token for initial setup.*
 
 ---
 
@@ -62,23 +73,41 @@ This phase uses CLI commands to configure your repositories and prepare AWS.
 
 ```bash
 # === Set Environment Variables (run this first) ===
-export GITHUB_ORG="acme-corp" # Your GitHub Organization name
+# Set GITHUB_ORG based on your choice in Phase I, Section 3.
+# If using Option A (Free/Public): export GITHUB_ORG="your-github-username"
+# If using Option B (Paid/Private): export GITHUB_ORG="your-organization-name"
+export GITHUB_ORG="acme-corp" # Your GitHub Organization name or personal username
 export ANVIL_REPO_NAME="project-anvil"
 export OPS_REPO_NAME="project-anvil-ops"
 export ANVIL_REPO="$GITHUB_ORG/$ANVIL_REPO_NAME"
 export OPS_REPO="$GITHUB_ORG/$OPS_REPO_NAME"
 export REVIEWER_USERNAME="<YOUR_GITHUB_USERNAME>" # GitHub user to approve deployments
 
-# === Create Repositories ===
+# 1. Create the 'project-anvil' and 'project-anvil-ops' repositories on GitHub.
+#    NOTE: The --public or --private flag used here MUST match your choice in Phase I, Section 3.
+#    If you chose Option A (Free/Public) in Phase I, use --public.
+#    If you chose Option B (Paid/Private) in Phase I, use --private.
 gh repo create $ANVIL_REPO --private --clone
 gh repo create $OPS_REPO --private --clone
 
-# After cloning, populate the 'project-anvil' directory with its source code.
-# You can do this by copying the files from the course materials into the
-# 'project-anvil' directory that was just created.
+# Your repositories are now created on GitHub and cloned locally (empty).
+# You must now populate 'project-anvil' with its source code and push it.
+
+# 2. Populate 'project-anvil' with its source code and push to GitHub:
+#    Copy all files from the Project Anvil course materials (Terraform, Packer, scripts, etc.)
+#    into the local 'project-anvil' directory that was just created by the 'gh repo create' command.
+#    Then, from within the 'project-anvil' directory, run these commands:
+cd project-anvil
+git add .
+git commit -m "Initial commit of Project Anvil infrastructure"
+git branch -M main # Ensures your primary branch is named 'main'
+git push -u origin main
+
+# After 'project-anvil' is pushed, you can proceed to create and populate the 'project-anvil-ops'
+# repository in the next section (1.1).
 ```
 
-#### 1.1. Populate the GitOps Repository (`project-anvil-ops`)
+### 1.1. Populate the GitOps Repository (`project-anvil-ops`)
 
 This second repository holds the operational configuration files. After cloning the empty `project-anvil-ops` repository, create the following files and directories inside it.
 
@@ -192,48 +221,43 @@ This second repository holds the operational configuration files. After cloning 
                   done
         ```
 
-3. **Commit and Push:** Commit and push the `environments` directory and the `.github` directory to the `main` branch of your `project-anvil-ops` repository.
+3. **Commit and Push:** After creating the `environments` and `.github` directories/files as described above, run the following commands from within your `project-anvil-ops` directory to commit and push them to the `main` branch of your `project-anvil-ops` repository.
+
+    ```bash
+    # Ensure you are in the 'project-anvil-ops' directory
+    # cd project-anvil-ops # Use this if you are not already in the directory
+    git add environments/ .github/
+    git commit -m "Initial commit of Project Anvil operational configs and sync workflow"
+    git branch -M main # Ensures your primary branch is named 'main'
+    git push -u origin main
+    ```
 
 #### 1.2. Configure Branch Protections
 
+**NOTE:** Branch protection rules and GitHub Deployment Environments are advanced features that enhance security and control.
+
 ```bash
 # === Protect the 'main' branch of the Anvil Repo ===
-gh api \
-  --method PUT \
-  /repos/$ANVIL_REPO/branches/main/protection \
-  -f 'required_status_checks[strict]=true' \
-  -f 'required_status_checks[contexts][]=placeholder' \
-  -f 'enforce_admins=true' \
-  -F 'required_pull_request_reviews[dismiss_stale_reviews]=true' \
-  -F 'required_pull_request_reviews[require_code_owner_reviews]=true' \
-  -F 'required_pull_request_reviews[required_approving_review_count]=1' \
-  -F 'required_pull_request_reviews[require_last_push_approval]=true' \
-  -F 'restrictions=null' \
-  -F 'required_linear_history=false' \
-  -F 'allow_force_pushes=false' \
-  -F 'allow_deletions=false' \
-  -F 'required_conversation_resolution=true'
+- If you followed **Option A (Free GitHub Account for Lab/Learning)** in Phase I:
+  - These features **are available** for your **public repositories** on the GitHub Free plan.
+  - Use the commands below as written to apply these protections. This is recommended for lab environments to fully experience the guide.
+- If you followed **Option B (Paid GitHub Plan for Real-World Best Practices)** in Phase I:
+  - These features **are available** for your **private repositories** because you have a paid plan.
+  - Use the commands below as written to apply these protections.
+- If you are using a **free personal GitHub account with private repositories** (i.e., you did not make your repos public and did not get a paid plan), these commands will **fail** with a `403 Forbidden` error. You can skip this section, but you will lose these important security and workflow features.
+
+```bash
+# === Protect the 'main' branch of the Anvil Repo ===
+gh api --method PUT /repos/$ANVIL_REPO/branches/main/protection -f 'required_status_checks[strict]=true' -f 'required_status_checks[contexts][]=placeholder' -f 'enforce_admins=true' -F 'required_pull_request_reviews[dismiss_stale_reviews]=true' -F 'required_pull_request_reviews[require_code_owner_reviews]=true' -F 'required_approving_review_count]=1' -F 'required_pull_request_reviews[require_last_push_approval]=true' -F 'restrictions=null' -F 'required_linear_history=false' -F 'allow_force_pushes=false' -F 'allow_deletions=false' -F 'required_conversation_resolution=true'
 
 # === Protect the 'main' branch of the Ops Repo ===
-gh api \
-  --method PUT \
-  /repos/$OPS_REPO/branches/main/protection \
-  -f 'required_status_checks=null' \
-  -f 'enforce_admins=true' \
-  -F 'required_pull_request_reviews[dismiss_stale_reviews]=true' \
-  -F 'required_pull_request_reviews[required_approving_review_count]=1' \
-  -F 'restrictions=null' \
-  -F 'required_linear_history=true' \
-  -F 'allow_force_pushes=false' \
-  -F 'allow_deletions=false' \
-  -F 'required_conversation_resolution=true'
+gh api --method PUT /repos/$OPS_REPO/branches/main/protection -f 'required_status_checks=null' -f 'enforce_admins=true' -F 'required_pull_request_reviews[dismiss_stale_reviews]=true' -F 'required_pull_request_reviews[required_approving_review_count]=1' -F 'restrictions=null' -F 'required_linear_history=true' -F 'allow_force_pushes=false' -F 'allow_deletions=false' -F 'required_conversation_resolution=true'
 
 # === Protect the Environments in the Anvil Repo ===
 REVIEWER_ID=$(gh api /users/$REVIEWER_USERNAME --jq .id)
 gh api -X PUT /repos/$ANVIL_REPO/environments/prod -f "reviewers[0][type]=User" -f "reviewers[0][id]=$REVIEWER_ID"
 gh api -X PUT /repos/$ANVIL_REPO/environments/uat -f "reviewers[0][type]=User" -f "reviewers[0][id]=$REVIEWER_ID"
 gh api -X PUT /repos/$ANVIL_REPO/environments/qa -f "reviewers[0][type]=User" -f "reviewers[0][id]=$REVIEWER_ID"
-```
 
 ### 2. Create AWS OIDC Roles and GitHub Secrets
 
