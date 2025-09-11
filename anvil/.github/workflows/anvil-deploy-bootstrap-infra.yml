@@ -1,3 +1,12 @@
+# This CI/CD pipeline deploys the foundational infrastructure for Project Anvil.
+# It is intended to be run manually from the GitHub Actions UI when you need to
+# set up the foundational resources like S3 buckets for Terraform state and
+# vulnerability reports. This should be done before deploying any environment-specific
+# infrastructure. The pipeline includes a pre-check to ensure that the required
+# S3 buckets do not already exist, enforcing a clean start. This action is
+# destructive and should be used with caution, ensuring that all necessary
+# backups and precautions are taken before proceeding.
+
 name: 'Anvil: Deploy - 0 - Bootstrap - Foundational Infrastructure'
 
 on:
@@ -40,6 +49,15 @@ jobs:
           role-to-assume: ${{ secrets.AWS_IAM_ROLE_FOR_BOOTSTRAP }}
           aws-region: ${{ github.event.inputs.aws_region }}
 
+      # Setup Terraform
+      - name: 'Setup Terraform'
+        uses: hashicorp/setup-terraform@v3
+
+      # Terraform Init now runs before any terraform import/state commands
+      - name: 'Terraform Init'
+        id: init
+        run: terraform init
+
       # Pre-check S3 buckets (error if they exist) to enforce clean start
       - name: 'Pre-check: Ensure S3 Buckets Do Not Exist'
         run: |
@@ -72,7 +90,8 @@ jobs:
           echo "All required S3 buckets do not exist. Proceeding with deploy."
         shell: bash # Ensure bash shell is used for the script
 
-      # This step must run AFTER AWS credentials are configured and BEFORE Terraform Init/Apply.
+      # Automate Import of Existing Secrets Manager Containers
+      # This step must run AFTER AWS credentials are configured AND AFTER Setup Terraform AND AFTER Terraform Init.
       - name: 'Automate Import of Existing Secrets Manager Containers'
         run: |
           set -e # Exit immediately if a command exits with a non-zero status.
@@ -134,13 +153,6 @@ jobs:
 
           echo "Secrets Manager import automation complete."
         shell: bash # Ensure bash shell is used for the script
-
-      - name: 'Setup Terraform'
-        uses: hashicorp/setup-terraform@v3
-
-      - name: 'Terraform Init'
-        id: init
-        run: terraform init
 
       - name: 'Terraform Apply'
         run: terraform apply -auto-approve
