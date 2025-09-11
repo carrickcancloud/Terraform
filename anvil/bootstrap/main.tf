@@ -191,6 +191,9 @@ resource "aws_secretsmanager_secret" "pagerduty" {
     Environment = each.key
     ManagedBy   = "Terraform-Bootstrap"
   }
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_secretsmanager_secret" "wp_salts" {
@@ -201,5 +204,8 @@ resource "aws_secretsmanager_secret" "wp_salts" {
   tags = {
     Environment = each.key
     ManagedBy   = "Terraform-Bootstrap"
+  }
+  lifecycle {
+    prevent_destroy = true
   }
 }

@@ -1,4 +1,11 @@
-name: 'Anvil: Destroy Foundational Infrastructure'
+# This CI/CD pipeline destroys the foundational infrastructure for Project Anvil.
+# It is intended to be run manually from the GitHub Actions UI when you need to
+# completely tear down the foundational resources like S3 buckets for Terraform
+# state and vulnerability reports. This action is destructive and should be used
+# with caution, ensuring that all necessary backups and precautions are taken
+# before proceeding.
+
+name: 'Anvil: Destroy - Bootstrap - Foundational Infrastructure'
 
 on:
   workflow_dispatch:
@@ -53,6 +60,10 @@ jobs:
 
       - name: 'Terraform Init (for destroy)'
         run: terraform init
+
+      - name: 'Terraform Refresh (synchronize state with real resources)'
+        run: terraform refresh
+        continue-on-error: true
 
       - name: 'Terraform Destroy'
         run: terraform destroy -auto-approve

@@ -1,4 +1,10 @@
-name: 'Anvil: Destroy Main Application Infrastructure'
+# This CI/CD pipeline destroys the infrastructure for a specified environment in Project Anvil.
+# It is designed to be triggered manually from the GitHub Actions UI, allowing
+# an operator to choose the target environment to destroy. This action is destructive
+# and should be used with caution, ensuring that all necessary backups and precautions
+# are taken before proceeding.
+
+name: 'Anvil: Destroy - Environment - Infrastructure'
 
 on:
   workflow_dispatch:

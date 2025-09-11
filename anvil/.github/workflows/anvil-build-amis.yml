@@ -2,7 +2,7 @@
 # It builds environment-specific Golden AMIs, scans them for vulnerabilities,
 # uploads reports to an isolated S3 bucket, and stores the final AMI IDs in SSM.
 
-name: 'Anvil: Build Golden AMIs (Interactive)'
+name: 'Anvil: Build - Golden AMIs'
 
 on:
   # Allow manual triggering from the GitHub UI's "Actions" tab.

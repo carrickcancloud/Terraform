@@ -442,21 +442,12 @@ This prepares the AWS account with foundational resources, including per-environ
 - In the `project-anvil` repo, go to **Actions** -> **"Anvil: Bootstrap Foundational Infrastructure"**.
 - Run the workflow. Download and save the `ssh-private-keys.zip` artifact securely.
 
-### **Step 2: Populate Manual Secrets**
+### **Step 2: Populate Manual Secrets / Post-Deployment Configuration**
 
-This is a critical security step to ensure sensitive URLs are never committed to Git.
+This step ensures all sensitive external integration details are securely provided.
 
-- In the PagerDuty UI, get the single integration URL you created in Phase I.
-- Run the following CLI command for each environment, replacing `<PAGERDUTY_URL>`:
-
-    ```bash
-    export PAGERDUTY_URL="<YOUR_SINGLE_PAGERDUTY_URL_FROM_PHASE_I>"
-    
-    aws secretsmanager update-secret --secret-id acmelabs-website-dev-pagerduty-url --secret-string "$PAGERDUTY_URL" --profile anvil-admin
-    aws secretsmanager update-secret --secret-id acmelabs-website-qa-pagerduty-url --secret-string "$PAGERDUTY_URL" --profile anvil-admin
-    aws secretsmanager update-secret --secret-id acmelabs-website-uat-pagerduty-url --secret-string "$PAGERDUTY_URL" --profile anvil-admin
-    aws secretsmanager update-secret --secret-id acmelabs-website-prod-pagerduty-url --secret-string "$PAGERDUTY_URL" --profile anvil-admin
-    ```
+- **PagerDuty Integration URL:** This is now provided as an input when you run the "Anvil: Deploy Bootstrap Foundational Infrastructure" workflow (in the `pagerduty_url` field). Ensure you have already created the PagerDuty service and its AWS CloudWatch integration as per Phase I, Section 1.4, to obtain this URL.
+- **WordPress Authentication Salts:** These sensitive keys are automatically generated and stored in AWS Secrets Manager by Terraform during deployment. No manual action is required.
 
 ### **Step 3: Sync Operational Configuration**
 

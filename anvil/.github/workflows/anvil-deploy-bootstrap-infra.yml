@@ -1,0 +1,175 @@
+name: 'Anvil: Deploy - 0 - Bootstrap - Foundational Infrastructure'
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_account_id:
+        description: 'The AWS Account ID to deploy the foundational resources to.'
+        required: true
+        type: string
+      aws_region:
+        description: 'The AWS region for the resources.'
+        required: false
+        default: 'us-east-1'
+        type: string
+      pagerduty_url: # Input for the PagerDuty URL
+        description: 'The PagerDuty Integration URL (sensitive value).'
+        required: false
+        type: password # Using 'password' type to mask input in GitHub UI
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform-bootstrap:
+    name: 'Terraform Bootstrap Apply'
+    runs-on: ubuntu-latest
+    
+    defaults:
+      run:
+        working-directory: ./bootstrap # Run all steps from inside the new bootstrap directory
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_FOR_BOOTSTRAP }}
+          aws-region: ${{ github.event.inputs.aws_region }}
+
+      # Pre-check S3 buckets (error if they exist) to enforce clean start
+      - name: 'Pre-check: Ensure S3 Buckets Do Not Exist'
+        run: |
+          ENVIRONMENTS=("dev" "qa" "uat" "prod")
+          AWS_REGION="${{ github.event.inputs.aws_region }}"
+          
+          echo "Performing S3 bucket existence checks..."
+          BUCKETS_TO_CHECK=()
+          for env in "${ENVIRONMENTS[@]}"; do
+            BUCKETS_TO_CHECK+=("acmelabs-terraform-state-${env}")
+            BUCKETS_TO_CHECK+=("acmelabs-vulnerability-reports-${env}")
+          done
+
+          ALL_CLEAR=true
+          for bucket in "${BUCKETS_TO_CHECK[@]}"; do
+            echo "Checking if bucket '$bucket' exists..."
+            # Using aws s3api head-bucket to check existence without downloading content
+            if aws s3api head-bucket --bucket "$bucket" --region "$AWS_REGION" 2>/dev/null; then
+              echo "::error::Pre-check failed: S3 bucket '$bucket' already exists. Aborting deploy for a clean start."
+              ALL_CLEAR=false
+            else
+              echo "Bucket '$bucket' does not exist (OK)."
+            fi
+          done
+
+          if [ "$ALL_CLEAR" = false ]; then
+            echo "::error::One or more required S3 buckets already exist. Please delete them manually or choose a different naming prefix for a clean start."
+            exit 1
+          fi
+          echo "All required S3 buckets do not exist. Proceeding with deploy."
+        shell: bash # Ensure bash shell is used for the script
+
+      # This step must run AFTER AWS credentials are configured and BEFORE Terraform Init/Apply.
+      - name: 'Automate Import of Existing Secrets Manager Containers'
+        run: |
+          set -e # Exit immediately if a command exits with a non-zero status.
+
+          ENVIRONMENTS=("dev" "qa" "uat" "prod")
+          AWS_REGION="${{ github.event.inputs.aws_region }}"
+
+          echo "Attempting to import existing Secrets Manager secrets into Terraform state..."
+
+          # Loop through PagerDuty secrets
+          for env in "${ENVIRONMENTS[@]}"; do
+            TF_ADDRESS="aws_secretsmanager_secret.pagerduty[\"$env\"]"
+            SECRET_NAME="acmelabs-website-${env}-pagerduty-url"
+
+            # Check if resource is already in Terraform state for this path
+            if terraform state show "$TF_ADDRESS" &> /dev/null; then
+              echo "Secret container '$SECRET_NAME' ($TF_ADDRESS) is already in Terraform state. Skipping import."
+              continue # Skip to next secret
+            fi
+
+            # Check if secret exists in AWS
+            if SECRET_INFO=$(aws secretsmanager describe-secret --secret-id "$SECRET_NAME" --region "$AWS_REGION" 2>/dev/null); then
+              SECRET_ARN=$(echo "$SECRET_INFO" | jq -r '.ARN')
+              echo "Secret container '$SECRET_NAME' found in AWS. Importing into Terraform state as '$TF_ADDRESS'..."
+              terraform import "$TF_ADDRESS" "$SECRET_ARN"
+              if [ $? -ne 0 ]; then # Check import command exit code
+                echo "::error::Failed to import secret container '$SECRET_NAME' ($TF_ADDRESS). Please check permissions or manual inconsistencies."
+                exit 1 # Fail the workflow if import fails
+              fi
+            else
+              echo "Secret container '$SECRET_NAME' does not exist in AWS. Terraform will create it during apply."
+            fi
+          done
+
+          # Loop through WP Salts secrets
+          for env in "${ENVIRONMENTS[@]}"; do
+            TF_ADDRESS="aws_secretsmanager_secret.wp_salts[\"$env\"]"
+            SECRET_NAME="acmelabs-website-${env}-wordpress-salts"
+
+            # Check if resource is already in Terraform state for this path
+            if terraform state show "$TF_ADDRESS" &> /dev/null; then
+              echo "Secret container '$SECRET_NAME' ($TF_ADDRESS) is already in Terraform state. Skipping import."
+              continue # Skip to next secret
+            fi
+
+            # Check if secret exists in AWS
+            if SECRET_INFO=$(aws secretsmanager describe-secret --secret-id "$SECRET_NAME" --region "$AWS_REGION" 2>/dev/null); then
+              SECRET_ARN=$(echo "$SECRET_INFO" | jq -r '.ARN')
+              echo "Secret container '$SECRET_NAME' found in AWS. Importing into Terraform state as '$TF_ADDRESS'..."
+              terraform import "$TF_ADDRESS" "$SECRET_ARN"
+              if [ $? -ne 0 ]; then # Check import command exit code
+                echo "::error::Failed to import secret container '$SECRET_NAME' ($TF_ADDRESS). Please check permissions or manual inconsistencies."
+                exit 1 # Fail the workflow if import fails
+              fi
+            else
+              echo "Secret container '$SECRET_NAME' does not exist in AWS. Terraform will create it during apply."
+            fi
+          done
+
+          echo "Secrets Manager import automation complete."
+        shell: bash # Ensure bash shell is used for the script
+
+      - name: 'Setup Terraform'
+        uses: hashicorp/setup-terraform@v3
+
+      - name: 'Terraform Init'
+        id: init
+        run: terraform init
+
+      - name: 'Terraform Apply'
+        run: terraform apply -auto-approve
+        
+      - name: 'Update PagerDuty Secrets (if URL provided)'
+        if: github.event.inputs.pagerduty_url != ''
+        run: |
+          echo "Updating PagerDuty secrets for all environments..."
+          ENVIRONMENTS=("dev" "qa" "uat" "prod")
+          PAGERDUTY_URL="${{ github.event.inputs.pagerduty_url }}"
+
+          for env in "${ENVIRONMENTS[@]}"; do
+            SECRET_NAME="acmelabs-website-${env}-pagerduty-url"
+            echo "Attempting to update secret: $SECRET_NAME"
+            aws secretsmanager update-secret \
+              --secret-id "$SECRET_NAME" \
+              --secret-string "$PAGERDUTY_URL" \
+              --region "${{ github.event.inputs.aws_region }}" \
+              --profile default
+            if [ $? -ne 0 ]; then
+              echo "Error updating $SECRET_NAME. Please verify permissions and secret name." >&2
+            else
+              echo "Successfully updated $SECRET_NAME."
+            fi
+          done
+        shell: bash
+
+      - name: 'Upload SSH Private Keys as Artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-private-keys
+          path: bootstrap/.tmp_keys/*.pem

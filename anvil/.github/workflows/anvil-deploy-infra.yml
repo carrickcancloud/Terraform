@@ -2,7 +2,7 @@
 # It is designed to be triggered manually from the GitHub Actions UI, allowing
 # an operator to choose the target environment and application version to deploy.
 
-name: 'Anvil: Deploy Infrastructure (Interactive)'
+name: 'Anvil: Deploy - 1 - Environment - Infrastructure'
 
 on:
   # This makes the workflow manually triggerable.
