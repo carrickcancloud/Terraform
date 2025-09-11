@@ -6,8 +6,8 @@ output "terraform_state_s3_buckets" {
 }
 
 output "terraform_state_lock_table" {
-  description = "The name of the DynamoDB table for Terraform state locking."
-  value       = aws_dynamodb_table.terraform_locks.name
+  description = "A map of the DynamoDB table names for Terraform state locking, keyed by environment."
+  value       = { for env, table in aws_dynamodb_table.terraform_locks : env => table.name }
 }
 
 output "vulnerability_reports_s3_buckets" {

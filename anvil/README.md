@@ -234,34 +234,110 @@ This second repository holds the operational configuration files. After cloning 
 
 #### 1.2. Configure Branch Protections
 
-**NOTE:** Branch protection rules and GitHub Deployment Environments are advanced features that enhance security and control.
+Branch protection rules and GitHub Deployment Environments are advanced features that enhance security and control within your Git workflow. While these can be configured via `gh cli`, some environments may experience issues. Therefore, we provide manual configuration steps via the GitHub UI.
 
-```bash
-# === Protect the 'main' branch of the Anvil Repo ===
-- If you followed **Option A (Free GitHub Account for Lab/Learning)** in Phase I:
-  - These features **are available** for your **public repositories** on the GitHub Free plan.
-  - Use the commands below as written to apply these protections. This is recommended for lab environments to fully experience the guide.
-- If you followed **Option B (Paid GitHub Plan for Real-World Best Practices)** in Phase I:
-  - These features **are available** for your **private repositories** because you have a paid plan.
-  - Use the commands below as written to apply these protections.
-- If you are using a **free personal GitHub account with private repositories** (i.e., you did not make your repos public and did not get a paid plan), these commands will **fail** with a `403 Forbidden` error. You can skip this section, but you will lose these important security and workflow features.
+During the initial setup as a solo maintainer, the branch protection rule allows `@your-github-username` to bypass required pull requests. This is to streamline bootstrapping and avoid “chicken-and-egg” issues with CODEOWNERS and branch protection. When additional maintainers join, remove yourself from the bypass list to enforce proper review gates.
 
-```bash
-# === Protect the 'main' branch of the Anvil Repo ===
-gh api --method PUT /repos/$ANVIL_REPO/branches/main/protection -f 'required_status_checks[strict]=true' -f 'required_status_checks[contexts][]=placeholder' -f 'enforce_admins=true' -F 'required_pull_request_reviews[dismiss_stale_reviews]=true' -F 'required_pull_request_reviews[require_code_owner_reviews]=true' -F 'required_approving_review_count]=1' -F 'required_pull_request_reviews[require_last_push_approval]=true' -F 'restrictions=null' -F 'required_linear_history=false' -F 'allow_force_pushes=false' -F 'allow_deletions=false' -F 'required_conversation_resolution=true'
+1. **Configure `project-anvil` Branch Protection:**
+    - Go to your `project-anvil` repository on GitHub.com (`https://github.com/<YOUR_GITHUB_ORG_OR_USERNAME>/project-anvil`).
+    - Click on **"Settings"** (usually located near the top right, under the repository name).
+    - In the left sidebar, click on **"Branches"**.
+    - Under "Branch protection rules," click the **"Add rule"** button.
+    - **For "Branch name pattern," type `main`**.
+    - **Enable the following settings by checking their boxes:**
+        - **`Require a pull request before merging`**:
+            - `Require approvals`: Set to **`1`**.
+            - `Dismiss stale pull request approvals when new commits are pushed`: Check this.
+            - `Require review from Code Owners`: Check this.
+              - Set your GitHub username or team name explicitly (e.g., `@github-username-or-teamname`).
+            - `Restrict who can dismiss pull request reviews`: Check this.
+            - `Allow specified actors to bypass required pull requests`: Check this.
+              - Set your GitHub username or team name explicitly (e.g., `@github-username-or-teamname`).
+            - `Require approval of the most recent reviewable push`: Check this.
+        - **`Require status checks to pass before merging`**:
+            - `Require branches to be up to date before merging`: Check this.
+        - `Require conversation resolution before merging`: Check this.
+        - `Require linear history`: Check this.
+        - **`Do not allow bypassing the above settings`**: Check this.
+    - Click **"Create"** or **"Save changes"** at the bottom.
 
-# === Protect the 'main' branch of the Ops Repo ===
-gh api --method PUT /repos/$OPS_REPO/branches/main/protection -f 'required_status_checks=null' -f 'enforce_admins=true' -F 'required_pull_request_reviews[dismiss_stale_reviews]=true' -F 'required_pull_request_reviews[required_approving_review_count]=1' -F 'restrictions=null' -F 'required_linear_history=true' -F 'allow_force_pushes=false' -F 'allow_deletions=false' -F 'required_conversation_resolution=true'
+2. **Configure `project-anvil-ops` Branch Protection:**
+    - Go to your `project-anvil-ops` repository on GitHub.com (`https://github.com/<YOUR_GITHUB_ORG_OR_USERNAME>/project-anvil-ops`).
+    - Click on **"Settings"** (usually located near the top right, under the repository name).
+    - In the left sidebar, click on **"Branches"**.
+    - Under "Branch protection rules," click the **"Add rule"** button.
+    - **For "Branch name pattern," type `main`**.
+    - **Enable the following settings by checking their boxes:**
+        - **`Require a pull request before merging`**:
+            - `Require approvals`: Set to **`1`**.
+            - `Dismiss stale pull request approvals when new commits are pushed`: Check this.
+            - `Require review from Code Owners`: Check this.
+            - `Restrict who can dismiss pull request reviews`: Check this.
+            - `Allow specified actors to bypass required pull requests`: Check this.
+            - `Require approval of the most recent reviewable push`: Check this.
+        - **`Require status checks to pass before merging`**:
+            - `Require branches to be up to date before merging`: Check this.
+        - `Require conversation resolution before merging`: Check this.
+        - `Require linear history`: Check this.
+        - **`Do not allow bypassing the above settings`**: Check this.
+    - Click **"Create"** or **"Save changes"** at the bottom.
 
-# === Protect the Environments in the Anvil Repo ===
-REVIEWER_ID=$(gh api /users/$REVIEWER_USERNAME --jq .id)
-gh api -X PUT /repos/$ANVIL_REPO/environments/prod -f "reviewers[0][type]=User" -f "reviewers[0][id]=$REVIEWER_ID"
-gh api -X PUT /repos/$ANVIL_REPO/environments/uat -f "reviewers[0][type]=User" -f "reviewers[0][id]=$REVIEWER_ID"
-gh api -X PUT /repos/$ANVIL_REPO/environments/qa -f "reviewers[0][type]=User" -f "reviewers[0][id]=$REVIEWER_ID"
+3. **Configure Environment Protection for `project-anvil`:**
+    - Go to your `project-anvil` repository on GitHub.com (`https://github.com/<YOUR_GITHUB_ORG_OR_USERNAME>/project-anvil`).
+    - Click on **"Settings"** (usually located near the top right, under the repository name).
+    - In the left sidebar, click on **"Environments"**.
+    - For each environment (`prod`, `uat`, `qa`), click on the environment name.
+    - **Configure the following settings:**
+        - **"Deployment branches and tags"**:
+            - From the dropdown list, choose **"Selected branches and tags"**.
+            - Under "Add deployment branch or tag rule," specify which branches or tags are allowed to deploy to this environment:
+                - **For `prod`**: Add `main`.
+                - **For `uat`/`qa`**: Add `main` (or specific feature branches if desired for testing).
+        - *(Note: "Required reviewers" and "Wait timers" for environments are only available with an enterprise plan.)*
+    - Click **"Save environment"** at the bottom.
+
+**Deployments to QA, UAT, and PROD are only possible after an approved and merged PR to `main`, which is enforced by GitHub branch protection and CODEOWNERS.**
+
+---
+
+### **1.3. Implementing Code Owners for Required Reviews**
+
+The Branch Protection Rules above enable **"Require review from Code Owners"**. To make this work, you need a `CODEOWNERS` file in your repository. This file specifies individuals or teams responsible for reviewing code in specific parts of your codebase. When a pull request modifies code owned by a designated owner, that owner's review is automatically requested and required before the PR can be merged.
+
+1. **Create a `CODEOWNERS` file:**
+    - In your `project-anvil` repository, create a file named `CODEOWNERS` in the root directory, or within a `.github/` or `docs/` subdirectory (e.g., `.github/CODEOWNERS`).
+    - **Example `.github/CODEOWNERS` content for `project-anvil`:**
+
+        ```bash
+        # Require @YOUR_GITHUB_USERNAME to review all infrastructure changes
+        * @<YOUR_GITHUB_USERNAME>
+
+        ```
+
+        *Replace `<YOUR_GITHUB_USERNAME>` with your actual GitHub username (e.g., `github-username-or-teamname`). If you have a team, you can use `@your-org/team-slug` format.*
+
+2. **Add the `CODEOWNERS` file via Pull Request:**
+    - Create a new branch (e.g., `add-codeowners`).
+    - Add the `CODEOWNERS` file to your repository in this branch.
+    - Commit your changes.
+    - Push your branch to GitHub.
+    - Open a pull request targeting `main`.
+    - After review and approval, merge the PR into `main`.
+
+Once this file is in place and the branch protection rule "Require review from Code Owners" is enabled, any pull request affecting the specified code will automatically require a review from the listed Code Owners. This serves as your manual approval gate for code changes, including those that initiate deployments.
 
 ### 2. Create AWS OIDC Roles and GitHub Secrets
 
+Before creating IAM roles for GitHub Actions, you must create an OpenID Connect (OIDC) provider in your AWS account. This allows GitHub Actions to authenticate securely to AWS.
+
 ```bash
+# Create OIDC Provider
+aws iam create-open-id-connect-provider \
+  --url https://token.actions.githubusercontent.com \
+  --client-id-list sts.amazonaws.com \
+  --thumbprint-list ffffffffffffffffffffffffffffffffffffffff \
+  --profile anvil-admin
+
 # === Set Environment Variables (run this first) ===
 export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --profile anvil-admin)
 
@@ -292,17 +368,51 @@ cat > trust-policy-ops.json << EOL
 EOL
 
 # === Create IAM Roles ===
+
 aws iam create-role --role-name anvil-bootstrap-role --assume-role-policy-document file://trust-policy-anvil.json --profile anvil-admin
 aws iam create-role --role-name anvil-packer-builder-role --assume-role-policy-document file://trust-policy-anvil.json --profile anvil-admin
 aws iam create-role --role-name anvil-terraform-deploy-role --assume-role-policy-document file://trust-policy-anvil.json --profile anvil-admin
 aws iam create-role --role-name anvil-ops-sync-role --assume-role-policy-document file://trust-policy-ops.json --profile anvil-admin
 
 # === Attach Policies ===
-aws iam attach-role-policy --role-name anvil-bootstrap-role --policy-arn arn:aws:iam::aws:policy/AdministratorAccess --profile anvil-admin
-aws iam attach-role-policy --role-name anvil-packer-builder-role --policy-arn arn:aws:iam::aws:policy/AmazonSSMFullAccess --profile anvil-admin
-aws iam attach-role-policy --role-name anvil-packer-builder-role --policy-arn arn:aws:iam::aws:policy/AmazonEC2InstanceProfileForImageBuilder --profile anvil-admin
-aws iam attach-role-policy --role-name anvil-terraform-deploy-role --policy-arn arn:aws:iam::aws:policy/AdministratorAccess --profile anvil-admin
-aws iam attach-role-policy --role-name anvil-ops-sync-role --policy-arn arn:aws:iam::aws:policy/AmazonSSMFullAccess --profile anvil-admin
+
+aws iam attach-role-policy --role-name anvil-bootstrap-role \
+  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess \
+  --profile anvil-admin
+
+aws iam attach-role-policy --role-name anvil-packer-builder-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMFullAccess \
+  --profile anvil-admin
+
+aws iam attach-role-policy --role-name anvil-packer-builder-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonEC2FullAccess \
+  --profile anvil-admin
+
+cat > passrole-policy.json << EOL
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "*"
+    }
+  ]
+}
+EOL
+
+aws iam put-role-policy --role-name anvil-packer-builder-role \
+  --policy-name AllowPassRole \
+  --policy-document file://passrole-policy.json \
+  --profile anvil-admin
+
+aws iam attach-role-policy --role-name anvil-terraform-deploy-role \
+  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess \
+  --profile anvil-admin
+
+aws iam attach-role-policy --role-name anvil-ops-sync-role \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMFullAccess \
+  --profile anvil-admin
 
 # === Create GitHub Secrets ===
 BOOTSTRAP_ARN=$(aws iam get-role --role-name anvil-bootstrap-role --query 'Role.Arn' --output text --profile anvil-admin)
@@ -314,11 +424,14 @@ gh secret set AWS_IAM_ROLE_FOR_BOOTSTRAP -b"$BOOTSTRAP_ARN" --repo $ANVIL_REPO
 gh secret set AWS_IAM_ROLE_FOR_PACKER -b"$PACKER_ARN" --repo $ANVIL_REPO
 gh secret set AWS_IAM_ROLE_FOR_ANVIL -b"$TERRAFORM_ARN" --repo $ANVIL_REPO
 gh secret set AWS_IAM_ROLE_FOR_OPS_SYNC -b"$OPS_SYNC_ARN" --repo $OPS_REPO
+# These secrets are then referenced by the GitHub Actions workflows to assume the respective IAM roles.
 ```
 
 ---
 
 ## Phase III: The End-to-End Deployment Lifecycle
+
+**Deployments to QA, UAT, and PROD are only possible after an approved and merged PR to `main`, which is enforced by GitHub branch protection and CODEOWNERS.**
 
 Follow this exact sequence to bring an environment online from scratch.
 

@@ -1,0 +1,70 @@
+name: 'Anvil: Destroy Main Application Infrastructure'
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: 'The environment to destroy (dev, qa, uat, or prod)'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - uat
+          - prod
+      confirm_destroy:
+        description: 'Type "yes" (without quotes) to confirm destruction. THIS IS DESTRUCTIVE!'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  confirm-and-destroy:
+    name: 'Confirm & Destroy Main Infra'
+    runs-on: ubuntu-latest
+
+    # This job should be subject to GitHub Environment protection rules
+    # which can include required reviewers for UAT/Prod environments.
+    environment: ${{ github.event.inputs.target_environment }} # UNCOMMENTED THIS LINE
+
+    defaults:
+      run:
+        # This working directory assumes your main.tf is at the root of your 'project-anvil' repo.
+        # If your main.tf is inside a subfolder like 'project-anvil/anvil/', adjust this to './anvil'.
+        working-directory: ./
+
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Verify Confirmation'
+        run: |
+          if [ "${{ github.event.inputs.confirm_destroy }}" != "yes" ]; then
+            echo "::error::Destruction not confirmed. Please type 'yes' in the 'confirm_destroy' input to proceed."
+            exit 1
+          fi
+        shell: bash
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_FOR_ANVIL }} # Uses the same role as your main Terraform deployment workflow
+          aws-region: us-east-1 # Assumed to be consistent with your variables.tf
+
+      - name: 'Setup Terraform'
+        uses: hashicorp/setup-terraform@v3
+
+      - name: 'Terraform Init (for destroy)'
+        run: terraform init -backend-config="config/${{ github.event.inputs.target_environment }}.s3.tfbackend"
+
+      - name: 'Terraform Workspace Select (for destroy)'
+        run: terraform workspace select ${{ github.event.inputs.target_environment }}
+
+      - name: 'Terraform Destroy'
+        run: terraform destroy -auto-approve
+        # WARNING: Resources with 'prevent_destroy = true' (e.g., specific S3 buckets or RDS instances)
+        # might NOT be destroyed. You MUST manually verify and delete them if needed.

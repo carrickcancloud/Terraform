@@ -1,0 +1,73 @@
+name: 'Anvil: Destroy Foundational Infrastructure'
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_account_id:
+        description: 'The AWS Account ID where the foundational resources are deployed.'
+        required: true
+        type: string
+      aws_region:
+        description: 'The AWS region where the resources are deployed.'
+        required: false
+        default: 'us-east-1'
+        type: string
+      confirm_destroy:
+        description: 'Type "yes" (without quotes) to confirm destruction. THIS IS DESTRUCTIVE!'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  confirm-and-destroy:
+    name: 'Confirm & Destroy Foundational Infra'
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ./bootstrap # This targets the bootstrap module
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Verify Confirmation'
+        run: |
+          if [ "${{ github.event.inputs.confirm_destroy }}" != "yes" ]; then
+            echo "::error::Destruction not confirmed. Please type 'yes' in the 'confirm_destroy' input to proceed."
+            exit 1
+          fi
+        shell: bash
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_FOR_BOOTSTRAP }}
+          aws-region: ${{ github.event.inputs.aws_region }}
+
+      - name: 'Setup Terraform'
+        uses: hashicorp/setup-terraform@v3
+
+      - name: 'Terraform Init (for destroy)'
+        run: terraform init
+
+      - name: 'Terraform Destroy'
+        run: terraform destroy -auto-approve
+        # WARNING: Resources with 'prevent_destroy = true' (S3 state/reports buckets)
+        # will NOT be destroyed. You MUST manually delete them if needed.
+
+      - name: 'Display Manual Cleanup Warning'
+        run: |
+          echo "################################################################"
+          echo "## !!! IMPORTANT MANUAL CLEANUP REQUIRED !!!"
+          echo "################################################################"
+          echo "The following resources have 'prevent_destroy = true' and were NOT"
+          echo "destroyed by Terraform. You MUST manually delete them if you wish"
+          echo "to completely remove your foundational infrastructure:"
+          echo "- S3 buckets: acmelabs-terraform-state-*, acmelabs-vulnerability-reports-*"
+          echo "You can find their exact names in your AWS Console or previous apply logs."
+          echo "################################################################"
+        shell: bash
