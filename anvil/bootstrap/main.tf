@@ -126,20 +126,15 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "vulnerability_rep
   }
 }
 
-# --- SSH Key Pairs ---
+# --- SSH Key Pairs ---\
 
 resource "tls_private_key" "ssh" {
   for_each  = toset(var.environments)
   algorithm = "RSA"
   rsa_bits  = 4096
 
-  # Add this provisioner to write the private key to a file
-  provisioner "local-exec" {
-    # Ensure the directory exists
-    command = "mkdir -p ${path.module}/.tmp_keys && echo \"${self.private_key_pem}\" > ${path.module}/.tmp_keys/acmelabs-${each.key}-key.pem && chmod 600 ${path.module}/.tmp_keys/acmelabs-${each.key}-key.pem"
-    # This ensures the provisioner only runs when the key itself is created or changed
-    when    = create
-  }
+  # IMPORTANT: The local-exec for writing keys is now in 'null_resource.write_private_keys_to_files'
+  # It should NOT be here with 'when = create' as that causes issues on subsequent runs.
 }
 
 resource "aws_key_pair" "environment_keys" {
@@ -149,25 +144,34 @@ resource "aws_key_pair" "environment_keys" {
   public_key = tls_private_key.ssh[each.key].public_key_openssh
 }
 
-# Add a null_resource to clean up the keys after they are uploaded as artifacts
-# This makes the cleanup explicit within Terraform's lifecycle
-resource "null_resource" "cleanup_private_keys" {
-  # This resource only exists to trigger a local-exec that cleans up the private keys.
-  # We make it depend on the aws_key_pair creation to ensure keys are generated before cleanup.
-  # The actual deletion should happen after the GitHub Actions artifact upload, which is external
-  # to this Terraform apply. The 'destroy' provisioner is for 'terraform destroy' operations.
+# NEW: This null_resource ensures the private keys are reliably written to files.
+# Its provisioner will run on every 'terraform apply' due to the timestamp trigger.
+resource "null_resource" "write_private_keys_to_files" {
+  for_each = toset(var.environments)
 
   triggers = {
-    # A change in any of the private keys will cause this null_resource to "change"
-    # and thus trigger its create-time provisioners.
-    # We use a hash to ensure it triggers only if key content changes, not just on any apply.
-    all_private_keys_hash = sha256(jsonencode([for k in tls_private_key.ssh : k.private_key_pem]))
+    private_key_content_hash = sha256(tls_private_key.ssh[each.key].private_key_pem)
+    run_on_every_apply       = timestamp()
   }
 
-  # REMOVED THIS PROVISIONER BLOCK: This was causing the early deletion
-  # provisioner "local-exec" {
-  #   command = "rm -rf ${path.module}/.tmp_keys || true"
-  # }
+  provisioner "local-exec" {
+    # This command writes the private key content to a file.
+    # The sensitive value is passed directly to the shell, avoiding logging.
+    # IMPORTANT: Ensure 'EOF' is on a line by itself and not indented.
+    command = <<EOF
+mkdir -p "${path.module}/.tmp_keys/"
+echo "${tls_private_key.ssh[each.key].private_key_pem}" > "${path.module}/.tmp_keys/acmelabs-${each.key}-key.pem"
+chmod 600 "${path.module}/.tmp_keys/acmelabs-${each.key}-key.pem"
+EOF
+  }
+}
+
+# The existing null_resource for cleanup is fine as is, running on destroy.
+# Its 'triggers' are correct for detecting changes in keys.
+resource "null_resource" "cleanup_private_keys" {
+  triggers = {
+    all_private_keys_hash = sha256(jsonencode([for k in tls_private_key.ssh : k.private_key_pem]))
+  }
 
   # This provisioner should be the ONLY one that cleans up the temporary directory, and it runs ONLY on destroy.
   provisioner "local-exec" {

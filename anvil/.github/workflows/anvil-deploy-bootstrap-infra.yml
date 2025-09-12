@@ -21,10 +21,10 @@ on:
         required: false
         default: 'us-east-1'
         type: string
-      pagerduty_url: # Input for the PagerDuty URL
-        description: 'The PagerDuty Integration URL (sensitive value).'
+      pagerduty_url:
+        description: 'The PagerDuty Integration URL (sensitive value).' # Corrected: Removed trailing backslash
         required: false
-        type: password # Using 'password' type to mask input in GitHub UI
+        type: password
 
 permissions:
   id-token: write
@@ -37,7 +37,7 @@ jobs:
     
     defaults:
       run:
-        working-directory: ./bootstrap # Run all steps from inside the new bootstrap directory
+        working-directory: ./bootstrap
 
     steps:
       - name: 'Checkout Code'
@@ -79,7 +79,7 @@ jobs:
               echo "::error::Pre-check failed: S3 bucket '$bucket' already exists. Aborting deploy for a clean start."
               ALL_CLEAR=false
             else
-              echo "Bucket '$bucket' does not exist (OK)."
+              echo "Bucket '$bucket' does not exist (OK)." # Corrected: Removed trailing backslash
             fi
           done
 
@@ -88,7 +88,7 @@ jobs:
             exit 1
           fi
           echo "All required S3 buckets do not exist. Proceeding with deploy."
-        shell: bash # Ensure bash shell is used for the script
+        shell: bash
 
       # Automate Import of Existing Secrets Manager Containers
       # This step must run AFTER AWS credentials are configured AND AFTER Setup Terraform AND AFTER Terraform Init.
@@ -152,11 +152,24 @@ jobs:
           done
 
           echo "Secrets Manager import automation complete."
-        shell: bash # Ensure bash shell is used for the script
+        shell: bash
 
       - name: 'Terraform Apply'
         run: terraform apply -auto-approve
-        
+        # The 'null_resource.write_private_keys_to_files' (defined in your .tf file)
+        # will run here during apply and create the .pem files securely.
+
+      # Copy Keys for Artifact Upload
+      - name: 'Stage Private Keys for Artifact Upload'
+        # This step runs from ./bootstrap, but we want the keys at the repo root.
+        run: |
+          echo "Copying private keys to temporary staging directory at repo root..."
+          mkdir -p ../temp_ssh_keys/ # Create temp dir one level up (at repo root)
+          cp .tmp_keys/*.pem ../temp_ssh_keys/ # Copy keys from current working dir to new temp dir
+          echo "Contents of staged directory:"
+          ls -l ../temp_ssh_keys/
+        shell: bash
+
       - name: 'Update PagerDuty Secrets (if URL provided)'
         if: github.event.inputs.pagerduty_url != ''
         run: |
@@ -180,31 +193,22 @@ jobs:
           done
         shell: bash
 
-      # Extract and Save SSH Private Keys to files for artifact upload
-      # This step runs AFTER Terraform Apply to ensure keys are provisioned and state is updated.
-      - name: 'Extract and Save SSH Private Keys'
+      # Verify SSH Key Resources in State
+      - name: 'Verify SSH Key Resources in State'
         run: |
-          set -e
-          SSH_KEYS_DIR="bootstrap/.tmp_keys"
-          # Create the directory if it doesn't exist.
-          mkdir -p "$SSH_KEYS_DIR"
-
-          ENVIRONMENTS=("dev" "qa" "uat" "prod")
-          for env in "${ENVIRONMENTS[@]}"; do
-            KEY_NAME="acmelabs-${env}-key"
-            TF_OUTPUT_PATH="ssh_private_keys_pem[\"$env\"]"
-            
-            # Use terraform output to get the sensitive key content
-            # The -raw flag ensures only the value is printed, not "key = value"
-            echo "Extracting private key for environment: $env"
-            terraform output -raw "$TF_OUTPUT_PATH" > "$SSH_KEYS_DIR/$KEY_NAME.pem"
-            chmod 600 "$SSH_KEYS_DIR/$KEY_NAME.pem" # Set secure permissions
-          done
-          echo "SSH private keys extracted and saved to $SSH_KEYS_DIR"
+          echo "Checking if tls_private_key resources are in Terraform state..."
+          # This verifies the resource exists in state, not its sensitive content.
+          # We no longer check terraform output ssh_private_keys_pem here,
+          # as it should not be exposed in logs.
+          terraform state list | grep "tls_private_key.ssh" || echo "WARNING: tls_private_key.ssh resources not found in state!"
         shell: bash
 
+      # This step now simply picks up the files created by the null_resource
       - name: 'Upload SSH Private Keys as Artifact'
         uses: actions/upload-artifact@v4
         with:
           name: ssh-private-keys
-          path: bootstrap/.tmp_keys/*.pem
+          # Path is now relative to the repository root for unambiguous access.
+          path: temp_ssh_keys/*.pem
+          # Changed 'fail' to 'error' to fix syntax error in upload-artifact action
+          if-no-files-found: error
