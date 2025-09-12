@@ -49,7 +49,7 @@ jobs:
           role-to-assume: ${{ secrets.AWS_IAM_ROLE_FOR_BOOTSTRAP }}
           aws-region: ${{ github.event.inputs.aws_region }}
 
-      # Setup Terraform
+      # Setup Terraform needs to run before any terraform commands
       - name: 'Setup Terraform'
         uses: hashicorp/setup-terraform@v3
 
@@ -171,13 +171,36 @@ jobs:
               --secret-id "$SECRET_NAME" \
               --secret-string "$PAGERDUTY_URL" \
               --region "${{ github.event.inputs.aws_region }}" \
-              --profile default
+              # REMOVED --profile default from here
             if [ $? -ne 0 ]; then
               echo "Error updating $SECRET_NAME. Please verify permissions and secret name." >&2
             else
               echo "Successfully updated $SECRET_NAME."
             fi
           done
+        shell: bash
+
+      # Extract and Save SSH Private Keys to files for artifact upload
+      # This step runs AFTER Terraform Apply to ensure keys are provisioned and state is updated.
+      - name: 'Extract and Save SSH Private Keys'
+        run: |
+          set -e
+          SSH_KEYS_DIR="bootstrap/.tmp_keys"
+          # Create the directory if it doesn't exist.
+          mkdir -p "$SSH_KEYS_DIR"
+
+          ENVIRONMENTS=("dev" "qa" "uat" "prod")
+          for env in "${ENVIRONMENTS[@]}"; do
+            KEY_NAME="acmelabs-${env}-key"
+            TF_OUTPUT_PATH="ssh_private_keys_pem[\"$env\"]"
+            
+            # Use terraform output to get the sensitive key content
+            # The -raw flag ensures only the value is printed, not "key = value"
+            echo "Extracting private key for environment: $env"
+            terraform output -raw "$TF_OUTPUT_PATH" > "$SSH_KEYS_DIR/$KEY_NAME.pem"
+            chmod 600 "$SSH_KEYS_DIR/$KEY_NAME.pem" # Set secure permissions
+          done
+          echo "SSH private keys extracted and saved to $SSH_KEYS_DIR"
         shell: bash
 
       - name: 'Upload SSH Private Keys as Artifact'

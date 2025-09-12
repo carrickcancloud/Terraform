@@ -164,14 +164,12 @@ resource "null_resource" "cleanup_private_keys" {
     all_private_keys_hash = sha256(jsonencode([for k in tls_private_key.ssh : k.private_key_pem]))
   }
 
-  provisioner "local-exec" {
-    # This command will execute after creation of this null_resource,
-    # effectively after the main 'terraform apply' is done.
-    # We clean up the temporary directory immediately.
-    command = "rm -rf ${path.module}/.tmp_keys || true"
-  }
+  # REMOVED THIS PROVISIONER BLOCK: This was causing the early deletion
+  # provisioner "local-exec" {
+  #   command = "rm -rf ${path.module}/.tmp_keys || true"
+  # }
 
-  # For cleanup on 'terraform destroy'
+  # This provisioner should be the ONLY one that cleans up the temporary directory, and it runs ONLY on destroy.
   provisioner "local-exec" {
     command = "rm -rf ${path.module}/.tmp_keys || true"
     when    = destroy
