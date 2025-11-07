@@ -1,0 +1,60 @@
+# ==============================================================================
+# Project Anvil - AMI Builder Layer
+# packer/configs/nginx-default
+#
+# Default Nginx configuration for the web server AMI. This configures Nginx
+# to listen on HTTP and HTTPS, redirect HTTP to HTTPS, and proxy dynamic requests
+# to the internal Application Load Balancer of the App Tier. Certificate paths
+# are placeholders, filled by the instance_setup.sh script at boot.
+#
+# Author: Carrick Bradley
+# Last Updated: 2025-09-24
+# ==============================================================================
+
+server {
+    listen 80;
+    server_name _ ; # Catches all domains
+    return 301 https://$host$request_uri; # Redirect HTTP to HTTPS
+}
+
+server {
+    listen 443 ssl http2;
+    server_name _ ; # Catches all domains
+
+    # These certificate paths are placeholders. The instance_setup.sh script
+    # will generate the actual certificates and place them here at boot.
+    # Nginx will fail to start until that script runs successfully.
+    ssl_certificate /etc/ssl/acme_internal/cert.pem;
+    ssl_certificate_key /etc/ssl/acme_internal/private/privkey.pem;
+
+    # Standard security and performance settings (TLS protocols, ciphers)
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
+    # The root for static files served directly by the web tier (WordPress content).
+    root /var/www/html;
+    index index.php index.html index.htm;
+
+    # Location block for static assets. This tells Nginx to serve files from
+    # the local disk if they exist under /wp-content/.
+    location /wp-content/ {
+        try_files $uri $uri/ =404;
+    }
+
+    # Location block for all other requests.
+    # This proxy_pass directive is key to the 3-tier architecture.
+    # It forwards all dynamic requests to the internal Application Load Balancer
+    # of the App Tier. The ${app_tier_dns} variable is a placeholder that
+    # is replaced by the instance_setup.sh.tpl script at instance launch.
+    location / {
+        set $app_tier_alb ""; # This will be set dynamically by instance_setup.sh.tpl
+        proxy_pass https://$app_tier_alb;
+        
+        # Forward necessary headers to the backend application tier
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

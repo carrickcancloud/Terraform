@@ -1,0 +1,529 @@
+name: '0-Deploy Bootstrap Infra'
+# ==============================================================================
+# Project Anvil - CI/CD Workflow
+# .github/workflows/0-deploy-bootstrap.yml
+#
+# This workflow deploys the foundational 'bootstrap' layer for Project Anvil.
+# It provisions AWS resources necessary for state management, central secrets
+# containers, SSH keys, base ACM certificates, and all required IAM roles/policies.
+# This workflow must be run successfully before deploying any other layer.
+#
+# Author: Carrick Bradley
+# Last Updated: 2025-10-29 - Fixed layer bucket KMS key imports
+# ==============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      change_ticket:
+        description: 'Enter the JIRA or change ticket number for this deployment.'
+        required: true
+        type: string
+      target_environment:
+        description: 'The target environment (dev, qa, uat, prod) for which to deploy bootstrap resources.'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - uat
+          - prod
+      aws_region:
+        description: 'The AWS region where foundational resources will be deployed.'
+        required: false
+        default: 'us-east-1'
+        type: string
+      pagerduty_url:
+        description: 'PagerDuty Integration URL for this environment (if setting initial value).'
+        required: false
+        type: password
+      oidc_thumbprint_input:
+        description: 'The OIDC thumbprint for GitHub Actions (from AWS IAM OIDC Provider).'
+        required: true
+        type: string
+        default: '6938fd4d98bab03faadb97b34396831e3780aea1'
+      # NEW INPUT FOR KMS MIGRATION
+      perform_kms_for_each_migration:
+        description: 'SET TO TRUE ONCE ONLY to migrate old KMS key/alias state to new for_each addressing. Leave false normally.'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform-bootstrap:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target_environment }}
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_FOR_BOOTSTRAP }}
+          aws-region: ${{ github.event.inputs.aws_region }}
+
+      # ----------------------------------------------------------------------
+      # Ensure the S3 bucket and DynamoDB table for the bootstrap backend exist
+      # ----------------------------------------------------------------------
+      - name: 'Create S3 Bucket and DynamoDB Table for Bootstrap State (if needed)'
+        run: |
+          ENV_NAME="${{ github.event.inputs.target_environment }}"
+          AWS_REGION="${{ github.event.inputs.aws_region }}"
+
+          BOOTSTRAP_BUCKET_NAME="acmelabs-terraform-state-bootstrap-${ENV_NAME}"
+          BOOTSTRAP_DDB_TABLE_NAME="acmelabs-terraform-lock-table-bootstrap-${ENV_NAME}"
+
+          # Create S3 bucket if it does not exist
+          if ! aws s3api head-bucket --bucket "${BOOTSTRAP_BUCKET_NAME}" 2>/dev/null; then
+            echo "Creating S3 bucket: ${BOOTSTRAP_BUCKET_NAME}"
+            if [ "${AWS_REGION}" = "us-east-1" ]; then
+              aws s3api create-bucket \
+                --bucket "${BOOTSTRAP_BUCKET_NAME}" \
+                --region "${AWS_REGION}"
+            else
+              aws s3api create-bucket \
+                --bucket "${BOOTSTRAP_BUCKET_NAME}" \
+                --region "${AWS_REGION}" \
+                --create-bucket-configuration LocationConstraint="${AWS_REGION}"
+            fi
+          else
+            echo "S3 bucket ${BOOTSTRAP_BUCKET_NAME} already exists."
+          fi
+          
+          # --- APPLY SECURITY CONFIGURATIONS IDEMPOTENTLY ---
+          # These commands will run every time to ensure the settings are correct,
+          # regardless of whether the bucket was just created or already existed.
+          echo "Ensuring security configurations for ${BOOTSTRAP_BUCKET_NAME}..."
+          aws s3api put-public-access-block --bucket "${BOOTSTRAP_BUCKET_NAME}" \
+            --public-access-block-configuration "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+
+          aws s3api put-bucket-versioning --bucket "${BOOTSTRAP_BUCKET_NAME}" \
+            --versioning-configuration "Status=Enabled"
+
+          aws s3api put-bucket-encryption --bucket "${BOOTSTRAP_BUCKET_NAME}" \
+            --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+
+          aws s3api put-bucket-logging --bucket "${BOOTSTRAP_BUCKET_NAME}" \
+            --bucket-logging-status "{\"LoggingEnabled\":{\"TargetBucket\":\"acmelabs-central-logs\",\"TargetPrefix\":\"s3-access-logs/bootstrap-state-${ENV_NAME}/\"}}"
+
+          aws s3api put-bucket-tagging --bucket "${BOOTSTRAP_BUCKET_NAME}" \
+            --tagging "TagSet=[{Key=Environment,Value=${ENV_NAME}},{Key=ManagedBy,Value=Terraform},{Key=Owner,Value=SRE-Team},{Key=Project,Value=acmelabs-website}]"
+
+          echo "Security configurations applied."
+          # ---------------------------------------------------
+
+          # Create DynamoDB table if it does not exist
+          if ! aws dynamodb describe-table --table-name "${BOOTSTRAP_DDB_TABLE_NAME}" --region "${AWS_REGION}" 2>/dev/null; then
+            echo "Creating DynamoDB table: ${BOOTSTRAP_DDB_TABLE_NAME}"
+            aws dynamodb create-table \
+              --table-name "${BOOTSTRAP_DDB_TABLE_NAME}" \
+              --attribute-definitions AttributeName=LockID,AttributeType=S \
+              --key-schema AttributeName=LockID,KeyType=HASH \
+              --billing-mode PAY_PER_REQUEST \
+              --region "${AWS_REGION}" \
+              --tags Key=Environment,Value="${ENV_NAME}" Key=ManagedBy,Value="Terraform" Key=Owner,Value="SRE-Team" Key=Project,Value="acmelabs-website"
+          else
+            echo "DynamoDB table ${BOOTSTRAP_DDB_TABLE_NAME} already exists."
+          fi
+
+      - name: 'Setup Terraform'
+        uses: hashicorp/setup-terraform@v3
+
+      - name: 'Show Terraform Version'
+        run: terraform version
+
+      - name: 'Install jq (for JSON processing in scripts)'
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      # --- Safeguards: Code Quality & Security (Strict Enforcement) ---
+      - name: 'Install graphviz (for terraform graph)'
+        run: sudo apt-get update && sudo apt-get install -y graphviz
+
+      - name: 'Install TFLint'
+        run: curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+
+      - name: 'Install tfsec'
+        run: |
+          wget https://github.com/aquasecurity/tfsec/releases/latest/download/tfsec-linux-amd64 -O /usr/local/bin/tfsec
+          chmod +x /usr/local/bin/tfsec
+
+      - name: 'Install Checkov'
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade checkov
+
+      - name: 'Terraform Init - Bootstrap Backend'
+        run: |
+          ENV_NAME="${{ github.event.inputs.target_environment }}"
+          AWS_REGION="${{ github.event.inputs.aws_region }}"
+
+          BOOTSTRAP_BUCKET_NAME="acmelabs-terraform-state-bootstrap-${ENV_NAME}"
+          BOOTSTRAP_KEY="bootstrap/terraform.tfstate"
+          BOOTSTRAP_DDB_TABLE_NAME="acmelabs-terraform-lock-table-bootstrap-${ENV_NAME}"
+
+          cd bootstrap # Change to the bootstrap directory
+          terraform init \
+            -backend-config="bucket=${BOOTSTRAP_BUCKET_NAME}" \
+            -backend-config="key=${BOOTSTRAP_KEY}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${BOOTSTRAP_DDB_TABLE_NAME}" \
+            -backend-config="encrypt=true"
+
+      - name: 'Make KMS Migration Script Executable'
+        run: chmod +x ./bootstrap/scripts/migrate_kms_state.sh
+
+      - name: 'Perform KMS Keys State Migration (One-Time Run)'
+        # This step runs ONLY if 'perform_kms_for_each_migration' is ticked
+        if: ${{ github.event.inputs.perform_kms_for_each_migration }}
+        run: |
+          echo "Starting KMS state migration..."
+          # The script expects to be run from the root of the repository
+          # Pass environment_name and aws_region as arguments to the script
+          ./bootstrap/scripts/migrate_kms_state.sh \
+            "${{ github.event.inputs.target_environment }}" \
+            "${{ github.event.inputs.aws_region }}"
+          echo "KMS state migration script finished."
+        working-directory: ${{ github.workspace }}
+        continue-on-error: false
+
+      - name: 'Terraform Format Check'
+        run: |
+          cd bootstrap
+          terraform fmt -recursive -check -diff || \
+          (echo "::error::Terraform code is not formatted. Run 'terraform fmt -recursive' locally to fix." && exit 1)
+
+      - name: 'Run TFLint'
+        run: |
+          cd bootstrap
+          tflint --init
+          tflint --recursive
+        continue-on-error: false # Set to 'true' in non-prod for leniency
+
+      - name: 'Run tfsec Security Scan'
+        run: |
+          cd bootstrap
+          tfsec --format default --out tfsec-results.txt
+        continue-on-error: false # Set to 'true' in non-prod for leniency
+
+      - name: 'Run Checkov Scan (modules-aware, full debug, always output)'
+        working-directory: bootstrap
+        env:
+          CHECKOV_CONFIG_FILE: ../.checkov.yml
+          LOG_LEVEL: DEBUG
+        run: |
+          echo "Checkov version:"
+          checkov --version
+
+          echo "Current directory: $(pwd)"
+          echo "Directory listing:"
+          ls -alh
+
+          echo "Checkov running with JUnit XML output (modules-aware, debug):"
+          checkov -d . --download-external-modules true --compact --framework terraform \
+            --output junitxml --output-file checkov-results.xml --log-level DEBUG -vv || true
+
+          echo "Checkov exit code: $?"
+          echo "Directory listing after Checkov (JUnit XML):"
+          ls -alh
+          echo "Checkov results file contents (first 40 lines, JUnit XML):"
+          head -40 checkov-results.xml || echo "No checkov-results.xml found or file is empty."
+          echo "Checkov results file size (JUnit XML):"
+          du -h checkov-results.xml || echo "No checkov-results.xml found."
+
+          # Fallback: If no results, create a CLI output file instead
+          if [ ! -s checkov-results.xml ]; then
+            echo "No checkov-results.xml or file is empty. Running Checkov with CLI output as fallback (modules-aware, debug)..."
+            checkov -d . --download-external-modules true --compact --framework terraform \
+              --output cli --output-file checkov-results.txt --log-level DEBUG -vv || true
+            if [ ! -s checkov-results.txt ]; then
+              echo "No checkov-results.txt created. Writing placeholder file."
+              echo "Checkov: No findings in this run." > checkov-results.txt
+            fi
+            export CHECKOV_ARTIFACT=checkov-results.txt
+          else
+            export CHECKOV_ARTIFACT=checkov-results.xml
+          fi
+
+          echo "Checkov run with CLI output (stdout, modules-aware, debug, no output file):"
+          checkov -d . --download-external-modules true --output cli --log-level DEBUG -vv || true
+
+          echo "Checkov artifact to upload: $CHECKOV_ARTIFACT"
+          ls -lh $CHECKOV_ARTIFACT
+          echo "Checkov artifact contents (first 40 lines):"
+          head -40 $CHECKOV_ARTIFACT
+        continue-on-error: false # Set to 'true' in non-prod for leniency
+
+      - name: 'Log Change Ticket Number'
+        run: |
+          echo "Change Ticket/JIRA: ${{ github.event.inputs.change_ticket }}"
+
+      - name: 'Write bootstrap.auto.tfvars for import'
+        run: |
+          ENV="${{ github.event.inputs.target_environment }}"
+          AWS_REGION="${{ github.event.inputs.aws_region }}"
+
+          echo "Current working directory before writing bootstrap.auto.tfvars: $(pwd)"
+          echo "Contents of bootstrap directory:"
+          ls -l
+
+          cat > bootstrap/bootstrap.auto.tfvars <<EOF
+          aws_region = "${AWS_REGION}"
+          environment_name = "${ENV}"
+          environments = ["${ENV}"]
+          project_name = "project-anvil"
+          cms_name = "wordpress"
+          domain_name = "acmelabs.cloud"
+          web_subdomain = "www"
+          build_timestamp = "$(date -u +%Y%m%d%H%M%S)"
+          github_org = "AcmeLabsCloud"
+          github_repo = "project-anvil"
+          oidc_thumbprint = "6938fd4d98bab03faadb97b34396831e3780aea1"
+          managedby = "Terraform"
+          owner = "SRE-Team"
+          EOF
+
+      - name: 'Warn if KMS keys are pending deletion'
+        run: |
+          ENV="${{ github.event.inputs.target_environment }}"
+          AWS_REGION="${{ github.event.inputs.aws_region }}"
+          for alias in \
+            "alias/${ENV}/vulnerability-reports" \
+            "alias/${ENV}/secretsmanager" \
+            "alias/acmelabs-terraform-lock-table-${ENV}/lock" \
+            "alias/central-logs-and-audit"
+          do
+            key_id=$(aws kms list-aliases --region "$AWS_REGION" --query "Aliases[?AliasName=='$alias'].TargetKeyId" --output text)
+            if [ -n "$key_id" ] && [ "$key_id" != "None" ]; then
+              key_state=$(aws kms describe-key --key-id "$key_id" --region "$AWS_REGION" --query 'KeyMetadata.KeyState' --output text)
+              if [ "$key_state" = "PendingDeletion" ]; then
+                echo "WARNING: KMS key $key_id ($alias) is pending deletion. If any secrets/resources depend on this key, cancel deletion before redeploying."
+              fi
+            fi
+          done
+
+      - name: 'Import Pre-existing AWS Resources into Terraform State (if present)'
+        run: |
+          set -e
+          ENV="${{ github.event.inputs.target_environment }}"
+          AWS_REGION="${{ github.event.inputs.aws_region }}"
+          PROJECT_NAME="acmelabs-website"
+
+          cd bootstrap
+
+          # Helper function: skip import if resource is already in state
+          tf_import_if_needed() {
+            local tf_addr=$1
+            local aws_id=$2
+            # Use grep -F to treat the address as a fixed string, preventing shell expansion issues
+            if terraform state list | grep -qF -- "$tf_addr"; then
+              echo "Skipping import for $tf_addr (already managed by Terraform state)"
+            else
+              echo "Attempting to import '$aws_id' as '$tf_addr'"
+              # The '-no-color' flag is important for reliable output parsing
+              output=$(terraform import -no-color -lock=false "$tf_addr" "$aws_id" 2>&1 || true)
+              if echo "$output" | grep -q "Resource already managed by Terraform"; then
+                echo "Skipping import for $tf_addr (already managed by Terraform state)"
+              elif echo "$output" | grep -q "Error:"; then
+                echo "ERROR during import of $aws_id as $tf_addr:" >&2
+                echo "$output" >&2
+                exit 1
+              else
+                echo "Successfully imported $aws_id as $tf_addr"
+                echo "$output"
+              fi
+            fi
+          }
+
+          ######################################################
+          # KMS Keys and Aliases
+          ######################################################
+          echo "### Importing All KMS Keys and Aliases (if present)..."
+          
+          # Use an associative array for easier mapping
+          declare -A ALL_KMS_RESOURCES
+          ALL_KMS_RESOURCES["aws_kms_key.vulnerability_reports[\"${ENV}\"]"]="aws_kms_alias.vulnerability_reports[\"${ENV}\"]|alias/${ENV}/vulnerability-reports"
+          ALL_KMS_RESOURCES["aws_kms_key.secrets_manager"]="aws_kms_alias.secrets_manager|alias/${ENV}/secretsmanager"
+          ALL_KMS_RESOURCES["module.lock_table[\"${ENV}\"].aws_kms_key.dynamodb"]="module.lock_table[\"${ENV}\"].aws_kms_alias.dynamodb|alias/acmelabs-terraform-lock-table-${ENV}/lock"
+          ALL_KMS_RESOURCES["module.central_logs.aws_kms_key.central_logs"]="module.central_logs.aws_kms_alias.central_logs|alias/central-logs-and-audit"
+          ALL_KMS_RESOURCES["aws_kms_key.layer_state_key[\"network\"]"]="aws_kms_alias.layer_state_key[\"network\"]|alias/${PROJECT_NAME}-${ENV}/network-state-key"
+          ALL_KMS_RESOURCES["aws_kms_key.layer_state_key[\"platform\"]"]="aws_kms_alias.layer_state_key[\"platform\"]|alias/${PROJECT_NAME}-${ENV}/platform-state-key"
+          ALL_KMS_RESOURCES["aws_kms_key.layer_state_key[\"apps\"]"]="aws_kms_alias.layer_state_key[\"apps\"]|alias/${PROJECT_NAME}-${ENV}/apps-state-key"
+
+          for tf_key_addr in "${!ALL_KMS_RESOURCES[@]}"; do
+            IFS='|' read -r tf_alias_addr alias_name <<< "${ALL_KMS_RESOURCES[$tf_key_addr]}"
+
+            key_id=$(aws kms list-aliases --region "$AWS_REGION" --query "Aliases[?AliasName=='$alias_name'].TargetKeyId" --output text 2>/dev/null || true)
+            if [ -n "$key_id" ] && [ "$key_id" != "None" ]; then
+              tf_import_if_needed "${tf_key_addr}" "$key_id"
+            else
+              echo "Skipping import for key ${tf_key_addr} (no key found for alias $alias_name)"
+            fi
+
+            alias_arn=$(aws kms list-aliases --region "$AWS_REGION" --query "Aliases[?AliasName=='$alias_name'].AliasArn" --output text 2>/dev/null || true)
+            if [ -n "$alias_arn" ]; then
+              tf_import_if_needed "${tf_alias_addr}" "$alias_name"
+            else
+              echo "Skipping import for alias ${tf_alias_addr} (alias $alias_name not found)"
+            fi
+          done
+
+          #########################
+          # Secrets Manager Secrets
+          #########################
+          echo "### Importing Secrets Manager Secrets (if present)..."
+          tf_import_if_needed "module.ssh_private_keys_secret[\"${ENV}\"].aws_secretsmanager_secret.this" "acmelabs-ssh-private-key-$ENV"
+          tf_import_if_needed "module.wp_salts_secret[\"${ENV}\"].aws_secretsmanager_secret.this" "acmelabs-website-$ENV-wordpress-salts"
+          tf_import_if_needed "module.pagerduty_secret[\"${ENV}\"].aws_secretsmanager_secret.this" "acmelabs-website-$ENV-pagerduty-url"
+
+          #########################
+          # S3 Buckets
+          #########################
+          echo "### Importing S3 Buckets (if present)..."
+          tf_import_if_needed "module.central_logs.aws_s3_bucket.central_logs" "acmelabs-central-logs"
+          tf_import_if_needed "module.central_logs.aws_s3_bucket.central_logs_self_access_logs" "acmelabs-central-logs-self-access-logs"
+          tf_import_if_needed "module.central_logs.aws_s3_bucket.audit_access_logs" "acmelabs-audit-access-logs"
+          tf_import_if_needed "aws_s3_bucket.vulnerability_reports[\"${ENV}\"]" "acmelabs-vulnerability-reports-${ENV}"
+
+          #########################
+          # DynamoDB Tables
+          #########################
+          echo "### Importing DynamoDB Tables (if present)..."
+          tf_import_if_needed "module.lock_table[\"${ENV}\"].aws_dynamodb_table.this" "acmelabs-terraform-lock-table-${ENV}"
+
+          #########################
+          # IAM Roles & Profiles
+          #########################
+          echo "### Importing IAM Roles and Profiles (if present)..."
+          tf_import_if_needed "module.iam_roles.aws_iam_role.bootstrap" "acmelabs-website-bootstrap-role"
+          tf_import_if_needed "module.iam_roles.aws_iam_role.packer" "acmelabs-website-packer-builder-role"
+          tf_import_if_needed "module.iam_roles.aws_iam_role.ops_sync" "acmelabs-website-ops-sync-role"
+          tf_import_if_needed "module.iam_roles.aws_iam_instance_profile.packer" "acmelabs-website-packer-builder-role"
+
+          #########################
+          # SSH Key Pair
+          #########################
+          echo "### Importing SSH Key Pair (if present)..."
+          tf_import_if_needed "module.ssh_key_pair[\"${ENV}\"].aws_key_pair.this" "acmelabs-${ENV}-key"
+
+          #########################
+          # ACM Certificates
+          #########################
+          echo "### Importing ACM Certificates (if present)..."
+          ACM_DOMAIN="*.${ENV}.acmelabs.cloud"
+          ACM_ARN=$(aws acm list-certificates --region "$AWS_REGION" --query "CertificateSummaryList[?DomainName=='$ACM_DOMAIN'].CertificateArn" --output text 2>/dev/null || true)
+          if [ -n "$ACM_ARN" ]; then
+            tf_import_if_needed "module.bootstrap_public_cert[\"${ENV}\"].aws_acm_certificate.this" "$ACM_ARN"
+          else
+            echo "Skipping import for ACM Certificate (not found for $ACM_DOMAIN)"
+          fi
+
+          #########################
+          # SSM Parameter
+          #########################
+          echo "### Importing SSM Parameter (CloudWatch Agent Config, if present)..."
+          PARAM_NAME="/anvil/${ENV}/cloudwatch-agent-config"
+          if aws ssm get-parameter --name "$PARAM_NAME" --region "$AWS_REGION" 2>/dev/null; then
+            tf_import_if_needed "module.cloudwatch_agent_config[\"${ENV}\"].aws_ssm_parameter.this" "$PARAM_NAME"
+          else
+            echo "Skipping import for SSM Parameter ($PARAM_NAME not found)"
+          fi
+
+          echo "### Import complete."
+
+      - name: 'Terraform Apply - Bootstrap Layer'
+        run: |
+          cd bootstrap # Ensure we are in the bootstrap directory
+          terraform apply -auto-approve \
+            -var="aws_region=${{ github.event.inputs.aws_region }}" \
+            -var="environment_name=${{ github.event.inputs.target_environment }}" \
+            -var="environments=[\"${{ github.event.inputs.target_environment }}\"]" \
+            -var="project_name=project-anvil" \
+            -var="cms_name=wordpress" \
+            -var="domain_name=acmelabs.cloud" \
+            -var="web_subdomain=www" \
+            -var="build_timestamp=$(date -u +%Y%m%d%H%M%S)" \
+            -var="github_org=${{ github.repository_owner }}" \
+            -var="github_repo=${{ github.event.repository.name }}" \
+            -var="oidc_thumbprint=${{ github.event.inputs.oidc_thumbprint_input }}" \
+            -var-file="../terraform.tfvars" # Load global project variables
+
+      - name: 'Generate Terraform Graph'
+        run: |
+          cd bootstrap
+          terraform graph | dot -Tpng > tfgraph.png
+      
+      - name: 'Set All Dependent GitHub Secrets'
+        id: set_secrets
+        run: |
+          # Ensure we are in the correct directory
+          cd bootstrap
+
+          echo "Getting all Terraform outputs in JSON format..."
+          TF_OUTPUTS=$(terraform output -json)
+          if [ -z "$TF_OUTPUTS" ]; then
+            echo "::error::Failed to get Terraform outputs."
+            exit 1
+          fi
+
+          # --- Map Terraform outputs to GitHub secret names ---
+          declare -A SECRET_MAP=(
+            ["network_role_arn"]="AWS_IAM_ROLE_FOR_NETWORK"
+            ["platform_role_arn"]="AWS_IAM_ROLE_FOR_PLATFORM"
+            ["packer_role_arn"]="AWS_IAM_ROLE_FOR_PACKER"
+          )
+          
+          # Add the application deployment role only if it exists in the output
+          if echo "$TF_OUTPUTS" | jq -e '.deploy_role_arn' > /dev/null 2>&1; then
+              SECRET_MAP["deploy_role_arn"]="AWS_IAM_ROLE_FOR_ANVIL"
+          fi
+
+          # --- Loop through and set each secret ---
+          for TF_OUTPUT_NAME in "${!SECRET_MAP[@]}"; do
+            SECRET_NAME="${SECRET_MAP[$TF_OUTPUT_NAME]}"
+            ARN_VALUE=$(echo "$TF_OUTPUTS" | jq -r --arg name "$TF_OUTPUT_NAME" '.[$name].value')
+
+            if [ -z "$ARN_VALUE" ] || [ "$ARN_VALUE" == "null" ]; then
+              echo "::warning::Could not find value for '$TF_OUTPUT_NAME'. Skipping secret '$SECRET_NAME'."
+              continue
+            fi
+            
+            echo "Setting secret '$SECRET_NAME' in repository ${{ github.repository }}..."
+            echo "$ARN_VALUE" | gh secret set "$SECRET_NAME" --repo ${{ github.repository }}
+          done
+        env:
+          GH_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
+
+      - name: 'Upload Plan/Scan/Graph Artifacts'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-artifacts
+          path: |
+            bootstrap/tfgraph.png
+            bootstrap/tfsec-results.txt
+            bootstrap/checkov-results.xml
+            bootstrap/checkov-results.txt
+
+      - name: 'Post-Apply - Secure PagerDuty URL'
+        run: |
+          ENV_NAME="${{ github.event.inputs.target_environment }}"
+          PAGERDUTY_URL="${{ github.event.inputs.pagerduty_url }}"
+
+          if [ -n "$PAGERDUTY_URL" ]; then
+            SECRET_ARN=$(aws secretsmanager describe-secret \
+                         --secret-id "acmelabs-website-${ENV_NAME}-pagerduty-url" \
+                         --query 'ARN' --output text --region "${{ github.event.inputs.aws_region }}")
+            echo "Updating PagerDuty Secret: ${SECRET_ARN}"
+            aws secretsmanager put-secret-value \
+              --secret-id "$SECRET_ARN" \
+              --secret-string "$PAGERDUTY_URL" \
+              --region "${{ github.event.inputs.aws_region }}"
+            echo "PagerDuty URL updated successfully."
+          else
+            echo "No PagerDuty URL provided, skipping secret update."
+          fi

@@ -1,0 +1,86 @@
+# ==============================================================================
+# Project Anvil - Root
+# .gitignore
+#
+# Defines files and directories to be ignored by Git for Project Anvil.
+# Ensures that sensitive data, build artifacts, and local Terraform files
+# are not committed to the repository.
+#
+# Author: Carrick Bradley
+# Last Updated: 2025-09-24
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Terraform Specific Ignores
+# ------------------------------------------------------------------------------
+# Local .terraform directories created by 'terraform init'
+.terraform/
+
+# Terraform .tfstate files, which contain the state of your infrastructure
+*.tfstate
+*.tfstate.*
+
+# Terraform crash log files
+crash.log
+crash.*.log
+
+# Terraform plan files, often created with '-out=tfplan' (e.g., tfplan-dev)
+*.tfplan
+*.tfplan.binary # For binary plan files if used
+
+# Ignore transient lock info files created by terraform apply
+.terraform.tfstate.lock.info
+
+# Ignore CLI configuration files
+.terraformrc
+terraform.rc
+
+# ------------------------------------------------------------------------------
+# Secrets & Sensitive Data
+# ------------------------------------------------------------------------------
+# Exclude all .tfvars files, which are likely to contain sensitive data.
+# These should not be part of version control.
+#*.tfvars
+*.tfvars.json
+
+# Allow specific tfvars files that contain non-sensitive data or configurations
+# (e.g., environment-specific scaling/instance types that are not secret).
+# This rule allows 'apps/*/environments/*.tfvars' but ignores others.
+# Adjust if you version control other specific .tfvars files.
+!apps/**/environments/*.tfvars
+
+# Private SSH keys generated locally or during build
+*.pem
+*.key
+*.prv
+
+# ------------------------------------------------------------------------------
+# Application Build & Packaging Artifacts
+# ------------------------------------------------------------------------------
+# Directory for packaged application content created by ami-builder scripts
+dist/
+
+# Temporary files created during AMI build process (e.g., Packer logs)
+packer-output.log
+packer-cache/
+*.json.aws-temp
+*.pkr.hcl.json # Packer's generated JSON config
+
+# ------------------------------------------------------------------------------
+# IDE and OS Specific Ignores
+# ------------------------------------------------------------------------------
+.DS_Store # MacOS Finder metadata
+.vscode/  # VS Code configuration
+.idea/    # IntelliJ/WebStorm configuration
+*.swp     # Vim swap files
+*~        # Backup files
+/tmp/     # Other temporary files
+
+# ------------------------------------------------------------------------------
+# Project-specific metadata
+# ------------------------------------------------------------------------------
+# Ignore any 'tree' command output files (e.g., if you generated a 'tree' file)
+tree
+
+# Ignore the .git directory itself if it accidentally gets listed
+/.git/

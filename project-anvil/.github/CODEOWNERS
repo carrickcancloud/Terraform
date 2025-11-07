@@ -1,0 +1,77 @@
+# ==============================================================================
+# Project Anvil - CODEOWNERS
+# .github/CODEOWNERS
+#
+# This file specifies individuals or teams responsible for reviewing code
+# in specific parts of the codebase. When a pull request modifies code
+# owned by a designated owner, that owner's review is automatically
+# requested and required before the PR can be merged, as enforced by
+# branch protection rules.
+#
+# Organization: AcmeLabsCloud
+#
+# Author: Carrick Bradley
+# Last Updated: 2025-09-24
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Default Owners
+# All files not explicitly covered below will require review from the SRE Team.
+# This ensures that all changes have a baseline review.
+# ------------------------------------------------------------------------------
+* @AcmeLabsCloud/sre-team
+
+# ------------------------------------------------------------------------------
+# Layer-Specific Owners
+# ------------------------------------------------------------------------------
+
+# Bootstrap Layer
+# Changes to foundational resources (state, locks, core IAM) are critical
+# and should be reviewed by the SRE team.
+/bootstrap/ @AcmeLabsCloud/sre-team
+
+# Network Layer
+# Core networking changes are handled by the SRE team.
+/network/ @AcmeLabsCloud/sre-team
+
+# Platform Layer
+# Shared platform services (monitoring, logging, shared secrets, etc.) are
+# managed by the SRE team.
+/platform/ @AcmeLabsCloud/sre-team
+
+# ------------------------------------------------------------------------------
+# Application Layers
+# ------------------------------------------------------------------------------
+
+# Development Environment Application Layer
+# Changes to the dev app infra are reviewed by the Dev Team.
+/apps/dev/ @AcmeLabsCloud/dev-team
+
+# QA Environment Application Layer
+# Changes to the QA app infra are reviewed by the QA Team.
+/apps/qa/ @AcmeLabsCloud/qa-team
+
+# UAT and Production Environment Application Layers
+# Changes to critical UAT and Prod app infra are reviewed by the SRE team.
+/apps/uat/ @AcmeLabsCloud/sre-team
+/apps/prod/ @AcmeLabsCloud/sre-team
+
+# ------------------------------------------------------------------------------
+# AMI Builder Layer
+# Changes to AMI build pipelines (Packer templates, build scripts) are reviewed
+# by the SRE team, as they are responsible for golden images.
+# ------------------------------------------------------------------------------
+/ami-builder/ @AcmeLabsCloud/sre-team
+
+# ------------------------------------------------------------------------------
+# Shared Modules
+# Changes to reusable Terraform modules are typically managed by the SRE team
+# or a dedicated platform/infra team.
+# ------------------------------------------------------------------------------
+/shared-modules/ @AcmeLabsCloud/sre-team
+
+# ------------------------------------------------------------------------------
+# Workflows
+# Changes to CI/CD workflows are critical and managed by the SRE team.
+# ------------------------------------------------------------------------------
+/.github/workflows/ @AcmeLabsCloud/sre-team

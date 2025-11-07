@@ -1,0 +1,230 @@
+name: '5-Deploy App Infra (uat)'
+# ==============================================================================
+# Project Anvil - CI/CD Workflow
+# .github/workflows/5-deploy-app-uat.yml
+#
+# This workflow deploys the 'apps/uat' layer of Project Anvil.
+# It provisions the application infrastructure specific to the 'uat' environment,
+# including web/app tiers, database, CDN, and WAF.
+# This workflow depends on the 'network' and 'platform' layers being successfully
+# deployed for the 'uat' environment.
+#
+# Author: <YOUR NAME OR TEAM>
+# Last Updated: YYYY-MM-DD
+# ==============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      ami_version:
+        description: 'The AMI version to deploy (e.g., Git commit hash from ami-builder).'
+        required: true
+        type: string
+      aws_region: # Added workflow input for region
+        description: 'The AWS region where app resources will be deployed.'
+        required: false
+        default: 'us-east-1' # Default for manual runs if not provided
+        type: string
+      confirm_apply:
+        description: 'Type "yes" (without quotes) to confirm Terraform apply. Only use after reviewing the plan!'
+        required: true
+        type: string
+      change_ticket:
+        description: 'Enter the JIRA or change ticket number for this deployment.'
+        required: true
+        type: string
+
+permissions:
+  id-token: write # Required for OIDC authentication with AWS
+  contents: read  # Required to checkout code
+
+jobs:
+  terraform-plan:
+    name: 'Terraform Plan (uat)'
+    runs-on: ubuntu-latest
+    environment: uat # Explicitly targets the 'uat' GitHub Environment
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_FOR_ANVIL }}
+          aws-region: ${{ github.event.inputs.aws_region }} # Use workflow input
+
+      - name: 'Setup Terraform'
+        uses: hashicorp/setup-terraform@v3
+
+      - name: 'Prepare Dynamic Variables'
+        id: prep_vars
+        run: |
+          BUILD_TIMESTAMP=$(date -u +%Y%m%d%H%M%S)
+          CMS_VERSION="6.9.1" # Example/placeholder, match your project's .wp-version or ami-builder output
+
+          echo "BUILD_TIMESTAMP=$BUILD_TIMESTAMP" >> "$GITHUB_ENV"
+          echo "CMS_VERSION=$CMS_VERSION" >> "$GITHUB_ENV"
+
+      - name: 'Terraform Init - Apps/uat Backend'
+        run: |
+          ENV_NAME="uat" # Hardcoded for this workflow
+          AWS_REGION="${{ github.event.inputs.aws_region }}" # Use workflow input for region
+
+          APPS_BUCKET_NAME="acmelabs-terraform-state-apps-${ENV_NAME}"
+          APPS_KEY="terraform.tfstate"
+          APPS_DDB_TABLE_NAME="acmelabs-terraform-lock-table-apps-${ENV_NAME}"
+
+          cd apps/uat # Change to the uat app directory
+          terraform init \
+            -backend-config="bucket=${APPS_BUCKET_NAME}" \
+            -backend-config="key=${APPS_KEY}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${APPS_DDB_TABLE_NAME}" \
+            -backend-config="encrypt=true"
+
+      # --- Safeguards: Code Quality & Security (Fail Fast) ---
+      - name: 'Install graphviz (for terraform graph)'
+        run: sudo apt-get update && sudo apt-get install -y graphviz
+      - name: 'Install TFLint'
+        run: curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+      - name: 'Install tfsec'
+        run: curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/install_linux.sh | bash
+      - name: 'Install Checkov'
+        run: pip install checkov
+
+      - name: 'Terraform Format Check'
+        run: |
+          cd apps/uat
+          terraform fmt -recursive -check -diff || \
+          (echo "::error::Terraform code is not formatted. Run 'terraform fmt -recursive' locally to fix." && exit 1)
+
+      - name: 'Run TFLint'
+        run: |
+          cd apps/uat
+          tflint --init
+          tflint --recursive
+        continue-on-error: true # Set to 'false' in prod for strict enforcement
+
+      - name: 'Run tfsec Security Scan'
+        run: |
+          cd apps/uat
+          tfsec --format default --out tfsec-results.txt
+        continue-on-error: true # Set to 'false' in prod for strict enforcement
+
+      - name: 'Run Checkov Scan'
+        run: |
+          cd apps/uat
+          checkov -d . --compact --framework terraform --output junit --output-file checkov-results.xml
+        continue-on-error: true # Set to 'false' in prod for strict enforcement
+
+      - name: 'Terraform Plan - Apps/uat'
+        id: plan
+        run: |
+          cd apps/uat
+          terraform plan \
+            -var="aws_region=${{ github.event.inputs.aws_region }}" \
+            -var="environment_name=uat" \
+            -var="project_name=project-anvil" \
+            -var="build_timestamp=${{ env.BUILD_TIMESTAMP }}" \
+            -var="cms_name=wordpress" \
+            -var="cms_version=${{ env.CMS_VERSION }}" \
+            -var="ami_version=${{ github.event.inputs.ami_version }}" \
+            -var="domain_name=acmelabs.cloud" \
+            -var="web_subdomain=www" \
+            -var="web_min_size=2" \
+            -var="web_max_size=4" \
+            -var="web_desired_capacity=2" \
+            -var="app_min_size=2" \
+            -var="app_max_size=4" \
+            -var="app_desired_capacity=2" \
+            -var="web_instance_type=t3.small" \
+            -var="app_instance_type=t3.medium" \
+            -var="db_instance_class=db.t3.small" \
+            -var="key_name=acmelabs-uat-key" \
+            -var="availability_zones=[\"us-east-1a\", \"us-east-1b\", \"us-east-1c\"]" \
+            -var="monitoring_provider=aws_cloudwatch" \
+            -var="logging_provider=aws_s3_firehose" \
+            -var="database_provider=aws_rds" \
+            -var="alerting_provider=pagerduty" \
+            -var="apm_provider=aws_xray" \
+            -var="rum_provider=aws_rum" \
+            -var="db_multi_az=true" \
+            -var-file="environments/uat.tfvars" \
+            -var-file="../terraform.tfvars" \
+            -no-color \
+            -out=tfplan
+
+      - name: 'Generate Terraform Graph'
+        run: |
+          cd apps/uat
+          terraform graph -type=plan | dot -Tpng > tfgraph.png
+
+      - name: 'Upload Plan Artifacts'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-uat
+          path: |
+            apps/uat/tfplan
+            apps/uat/tfgraph.png
+            apps/uat/tfsec-results.txt
+            apps/uat/checkov-results.xml
+
+  terraform-apply:
+    name: 'Terraform Apply (uat)'
+    needs: terraform-plan
+    runs-on: ubuntu-latest
+    environment: uat # Explicitly targets the 'uat' GitHub Environment
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_FOR_ANVIL }}
+          aws-region: ${{ github.event.inputs.aws_region }}
+
+      - name: 'Setup Terraform'
+        uses: hashicorp/setup-terraform@v3
+
+      - name: 'Terraform Init - Apps/uat Backend for Apply'
+        run: |
+          ENV_NAME="uat"
+          AWS_REGION="${{ github.event.inputs.aws_region }}"
+
+          APPS_BUCKET_NAME="acmelabs-terraform-state-apps-${ENV_NAME}"
+          APPS_KEY="terraform.tfstate"
+          APPS_DDB_TABLE_NAME="acmelabs-terraform-lock-table-apps-${ENV_NAME}"
+
+          cd apps/uat
+          terraform init \
+            -backend-config="bucket=${APPS_BUCKET_NAME}" \
+            -backend-config="key=${APPS_KEY}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${APPS_DDB_TABLE_NAME}" \
+            -backend-config="encrypt=true"
+
+      - name: 'Verify Apply Confirmation'
+        run: |
+          if [ "${{ github.event.inputs.confirm_apply }}" != "yes" ]; then
+            echo "::error::Terraform apply not confirmed. Please type 'yes' in the 'confirm_apply' input to proceed."
+            exit 1
+          fi
+        shell: bash
+
+      - name: 'Download Plan Artifact'
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-uat
+          path: apps/uat/ # Download into the correct subdirectory
+
+      - name: 'Log Change Ticket Number'
+        run: |
+          echo "Change Ticket/JIRA: ${{ github.event.inputs.change_ticket }}"
+
+      - name: 'Terraform Apply - Apps/uat'
+        run: |
+          cd apps/uat
+          terraform apply -auto-approve tfplan

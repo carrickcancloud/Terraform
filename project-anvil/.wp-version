@@ -1,0 +1,22 @@
+# ==============================================================================
+# Project Anvil - Root
+# .wp-version
+#
+# This file specifies the MINIMUM APPROVED MAJOR VERSION of WordPress that
+# the AMI builder pipeline is allowed to deploy. This acts as a safety gate.
+#
+# If the latest available WordPress version from wordpress.org/core/version-check/
+# has a DIFFERENT MAJOR VERSION than specified here, the AMI build pipeline
+# will FAIL, requiring manual approval (i.e., updating this file) before
+# proceeding with a major WordPress upgrade.
+#
+# Example: If this file contains '6', the pipeline will build AMIs with WP 6.x.x.
+# If WP 7.x.x is released, the pipeline will fail until this file is updated to '7'.
+#
+# Author: Carrick Bradley
+# Last Updated: 2025-09-24
+# ==============================================================================
+
+# Specify the APPROVED MAJOR VERSION for WordPress.
+# Example: '6' for WordPress 6.x.x
+6

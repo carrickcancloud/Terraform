@@ -1,0 +1,203 @@
+name: 'Destroy App Infra (dev)'
+# ==============================================================================
+# Project Anvil - CI/CD Workflow
+# .github/workflows/destroy-app-dev.yml
+#
+# This workflow is designed to destroy the 'apps/dev' layer for Project Anvil.
+# It tears down the application infrastructure specific to the 'dev' environment.
+# This is a highly destructive action and should only be triggered manually
+# with extreme caution.
+#
+# Author: Carrick Bradley
+# Last Updated: 2025-09-24
+# ==============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: 'Type "yes" (without quotes) to confirm destruction. THIS IS HIGHLY DESTRUCTIVE!'
+        required: true
+        type: string
+      aws_region: # Workflow input for region
+        description: 'The AWS region where app resources will be deployed.'
+        required: false
+        default: 'us-east-1' # Default for manual runs if not provided
+        type: string
+      change_ticket:
+        description: 'Enter the JIRA or change ticket number for this deployment.'
+        required: true
+        type: string
+
+permissions:
+  id-token: write # Required for OIDC authentication with AWS
+  contents: read  # Required to checkout code
+
+jobs:
+  confirm-and-destroy:
+    name: 'Confirm & Destroy Apps/dev Layer'
+    runs-on: ubuntu-latest
+    environment: dev # Explicitly targets the 'dev' GitHub Environment for protection rules
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_FOR_ANVIL }}
+          aws-region: ${{ github.event.inputs.aws_region }} # Use workflow input
+
+      - name: 'Setup Terraform'
+        uses: hashicorp/setup-terraform@v3
+
+      - name: 'Terraform Init - Apps/dev Backend for Destroy'
+        run: |
+          ENV_NAME="dev" # Hardcoded for this workflow
+          AWS_REGION="${{ github.event.inputs.aws_region }}" # Use workflow input
+
+          # These backend names are created by the bootstrap layer.
+          APPS_BUCKET_NAME="acmelabs-terraform-state-apps-${ENV_NAME}"
+          APPS_KEY="terraform.tfstate"
+          APPS_DDB_TABLE_NAME="acmelabs-terraform-lock-table-apps-${ENV_NAME}"
+
+          cd apps/dev # Change to the dev app directory
+          terraform init \
+            -backend-config="bucket=${APPS_BUCKET_NAME}" \
+            -backend-config="key=${APPS_KEY}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${APPS_DDB_TABLE_NAME}" \
+            -backend-config="encrypt=true"
+
+      - name: 'Generate Terraform Destroy Graph'
+        run: |
+          cd apps/dev
+          terraform graph -destroy | dot -Tpng > tfgraph-destroy.png
+
+      - name: 'Upload Destroy Graph Artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-dev-destroy-graph
+          path: apps/dev/tfgraph-destroy.png
+
+      - name: 'Verify Destruction Confirmation'
+        run: |
+          if [ "${{ github.event.inputs.confirm_destroy }}" != "yes" ]; then
+            echo "::error::Destruction not confirmed. Please type 'yes' in the 'confirm_destroy' input to proceed."
+            exit 1
+          fi
+        shell: bash
+
+      - name: 'Terraform Refresh (Synchronize State)'
+        run: |
+          cd apps/dev
+          terraform refresh \
+            -var="aws_region=${{ github.event.inputs.aws_region }}" \
+            -var="environment_name=dev" \
+            -var="project_name=project-anvil" \
+            -var="build_timestamp=$(date -u +%Y%m%d%H%M%S)" \
+            -var="cms_name=wordpress" \
+            -var="cms_version=6.9.1" \
+            -var="ami_version=latest" \
+            -var="domain_name=acmelabs.cloud" \
+            -var="web_subdomain=www" \
+            -var="web_min_size=1" \
+            -var="web_max_size=2" \
+            -var="web_desired_capacity=1" \
+            -var="app_min_size=1" \
+            -var="app_max_size=2" \
+            -var="app_desired_capacity=1" \
+            -var="web_instance_type=t3.micro" \
+            -var="app_instance_type=t3.micro" \
+            -var="db_instance_class=db.t3.micro" \
+            -var="key_name=acmelabs-dev-key" \
+            -var="availability_zones=[\"us-east-1a\", \"us-east-1b\", \"us-east-1c\"]" \
+            -var="monitoring_provider=aws_cloudwatch" \
+            -var="logging_provider=aws_s3_firehose" \
+            -var="database_provider=aws_rds" \
+            -var="alerting_provider=pagerduty" \
+            -var="apm_provider=aws_xray" \
+            -var="rum_provider=aws_rum" \
+            -var="db_multi_az=true" \
+            -var-file="environments/dev.tfvars" \
+            -var-file="../terraform.tfvars" # Load global project variables
+        continue-on-error: true # Allow refresh to fail if resources are already mostly gone
+
+      - name: 'Check for Change Ticket'
+        run: |
+          if [ -z "${{ github.event.inputs.change_ticket }}" ]; then
+            echo "::error::No change ticket provided. Aborting destroy operation."
+            exit 1
+          fi
+
+      - name: 'Log Change Ticket Number'
+        run: |
+          echo "Change Ticket/JIRA: ${{ github.event.inputs.change_ticket }}"
+
+      - name: 'Display Manual Cleanup Note and List prevent_destroy Resources'
+        if: always()
+        run: |
+          echo "################################################################"
+          echo "## !!! IMPORTANT MANUAL CLEANUP NOTE !!!"
+          echo "################################################################"
+          echo "Terraform 'destroy' will attempt to remove all resources managed"
+          echo "by the 'bootstrap' layer. However, resources configured with"
+          echo "'prevent_destroy = true' (if any) or those created outside of"
+          echo "Terraform will NOT be removed. Please verify manually if a full"
+          echo "teardown is desired."
+          echo "################################################################"
+          echo ""
+          echo "################################################################"
+          echo "## The following resources are protected with prevent_destroy = true"
+          echo "## and must be deleted manually in AWS if you want a full wipe."
+          echo "################################################################"
+          cd bootstrap
+          # List all resources in state and try to find prevent_destroy in their definition
+          terraform state list | while read -r resource; do
+            # Try to find the .tf file containing the resource definition
+            # This assumes resource type and name are in the format type.name
+            TYPE="${resource%%.*}"
+            NAME="${resource#*.}"
+            # Search for resource "type" "name" in any .tf file
+            FILE=$(grep -rl "resource[[:space:]]*\"$TYPE\"[[:space:]]*\"$NAME\"" .. 2>/dev/null | head -n1 || true)
+            if [ -n "$FILE" ] && grep -q "prevent_destroy *= *true" "$FILE"; then
+              echo "  $resource (defined in $FILE)"
+            fi
+          done
+          echo "  [Why these didn't delete automatically: Terraform is configured to protect these resources. Remove prevent_destroy and destroy manually if you are sure.]"
+        shell: bash          
+
+      - name: 'Terraform Destroy - Apps/dev Layer'
+        run: |
+          cd apps/dev
+          terraform destroy -auto-approve \
+            -var="aws_region=${{ github.event.inputs.aws_region }}" \
+            -var="environment_name=dev" \
+            -var="project_name=project-anvil" \
+            -var="build_timestamp=$(date -u +%Y%m%d%H%M%S)" \
+            -var="cms_name=wordpress" \
+            -var="cms_version=6.9.1" \
+            -var="ami_version=latest" \
+            -var="domain_name=acmelabs.cloud" \
+            -var="web_subdomain=www" \
+            -var="web_min_size=1" \
+            -var="web_max_size=2" \
+            -var="web_desired_capacity=1" \
+            -var="app_min_size=1" \
+            -var="app_max_size=2" \
+            -var="app_desired_capacity=1" \
+            -var="web_instance_type=t3.micro" \
+            -var="app_instance_type=t3.micro" \
+            -var="db_instance_class=db.t3.micro" \
+            -var="key_name=acmelabs-dev-key" \
+            -var="availability_zones=[\"us-east-1a\", \"us-east-1b\", \"us-east-1c\"]" \
+            -var="monitoring_provider=aws_cloudwatch" \
+            -var="logging_provider=aws_s3_firehose" \
+            -var="database_provider=aws_rds" \
+            -var="alerting_provider=pagerduty" \
+            -var="apm_provider=aws_xray" \
+            -var="rum_provider=aws_rum" \
+            -var="db_multi_az=true" \
+            -var-file="environments/dev.tfvars" \
+            -var-file="../terraform.tfvars" # Load global project variables

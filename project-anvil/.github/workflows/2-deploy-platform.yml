@@ -1,0 +1,154 @@
+name: '2-Deploy Platform Infra'
+# ==============================================================================
+# Project Anvil - CI/CD Workflow
+# .github/workflows/2-deploy-platform.yml
+#
+# This workflow deploys the shared 'platform' layer for Project Anvil.
+# It provisions services like logging, monitoring, shared S3, and certificates.
+# This workflow depends on the 'network' layer being successfully deployed.
+#
+# Author: Carrick Bradley
+# Last Updated: 2025-09-24
+# ==============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: 'The target environment (dev, qa, uat, prod) for which to deploy platform resources.'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - uat
+          - prod
+      aws_region: # Workflow input for region
+        description: 'The AWS region where platform resources will be deployed.'
+        required: false
+        default: 'us-east-1' # Default for manual runs if not provided
+        type: string
+      change_ticket:
+        description: 'Enter the JIRA or change ticket number for this deployment.'
+        required: true
+        type: string
+
+permissions:
+  id-token: write # Required for OIDC authentication with AWS
+  contents: read  # Required to checkout code
+
+jobs:
+  terraform-platform:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target_environment }} # Use GitHub Environments for protection
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_FOR_PLATFORM }}
+          aws-region: ${{ github.event.inputs.aws_region }} # Use workflow input
+
+      - name: 'Setup Terraform'
+        uses: hashicorp/setup-terraform@v3
+
+      # --- Safeguards: Code Quality & Security (Strict Enforcement) ---
+      - name: 'Install graphviz (for terraform graph)'
+        run: sudo apt-get update && sudo apt-get install -y graphviz
+
+      - name: 'Install TFLint'
+        run: curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+
+      - name: 'Install tfsec'
+        run: |
+          wget https://github.com/aquasecurity/tfsec/releases/latest/download/tfsec-linux-amd64 -O /usr/local/bin/tfsec
+          chmod +x /usr/local/bin/tfsec
+
+      - name: 'Install Checkov'
+        run: pip install checkov
+
+      - name: 'Terraform Init - Platform Backend'
+        run: |
+          ENV_NAME="${{ github.event.inputs.target_environment }}"
+          AWS_REGION="${{ github.event.inputs.aws_region }}" # Use workflow input
+
+          # These backend names are created by the bootstrap layer.
+          PLATFORM_BUCKET_NAME="acmelabs-terraform-state-platform-${ENV_NAME}" # Corrected: unique per environment
+          PLATFORM_KEY="terraform.tfstate"
+          PLATFORM_DDB_TABLE_NAME="acmelabs-terraform-lock-table-platform-${ENV_NAME}" # Corrected: unique per environment
+
+          cd platform # Change to the platform directory
+          terraform init \
+            -backend-config="bucket=${PLATFORM_BUCKET_NAME}" \
+            -backend-config="key=${PLATFORM_KEY}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${PLATFORM_DDB_TABLE_NAME}" \
+            -backend-config="encrypt=true"
+
+      - name: 'Terraform Format Check'
+        run: |
+          cd platform
+          terraform fmt -recursive -check -diff || \
+          (echo "::error::Terraform code is not formatted. Run 'terraform fmt -recursive' locally to fix." && exit 1)
+
+      - name: 'Run TFLint'
+        run: |
+          cd platform
+          tflint --init
+          tflint --recursive
+        continue-on-error: false # Set to 'true' in non-prod for leniency
+
+      - name: 'Run tfsec Security Scan'
+        run: |
+          cd platform
+          tfsec --format default --out tfsec-results.txt
+        continue-on-error: false # Set to 'true' in non-prod for leniency
+
+      - name: 'Run Checkov Scan'
+        run: |
+          cd platform
+          checkov -d . --compact --framework terraform --output junit --output-file checkov-results.xml
+        continue-on-error: false # Set to 'true' in non-prod for leniency
+
+      - name: 'Log Change Ticket Number'
+        run: |
+          echo "Change Ticket/JIRA: ${{ github.event.inputs.change_ticket }}"
+
+      - name: 'Terraform Apply - Platform Layer'
+        run: |
+          cd platform # Ensure we are in the platform directory
+          # Pass variables required by platform/variables.tf and global terraform.tfvars
+          terraform apply -auto-approve \
+            -var="aws_region=${{ github.event.inputs.aws_region }}" \
+            -var="environment_name=${{ github.event.inputs.target_environment }}" \
+            -var="build_timestamp=$(date -u +%Y%m%d%H%M%S)" \
+            -var="project_name=project-anvil" \
+            -var="domain_name=acmelabs.cloud" \
+            -var="route53_zone_id=Z0123456789ABCDEF01234" \
+            -var="vpc_id=vpc-0123456789abcdef0" \
+            -var="private_subnet_ids=[\"subnet-0123456789abcdef1\", \"subnet-0123456789abcdef2\"]" \
+            -var="vpc_endpoint_security_group_ids=[]" \
+            -var="log_group_name=/aws/application/${{ github.event.inputs.target_environment }}/web" \
+            -var="firehose_iam_role_arn=arn:aws:iam::123456789012:role/firehose-to-s3-role" \
+            -var="logs_to_firehose_role_arn=arn:aws:iam::123456789012:role/logs-to-firehose-role" \
+            -var="organization_name=\"AcmeLabs Inc.\"" \
+            -var="ca_validity_period_years=10" \
+            -var="dashboard_body_overview={}" \
+            -var-file="../terraform.tfvars" # Load global project variables
+
+      - name: 'Generate Terraform Graph'
+        run: |
+          cd platform
+          terraform graph | dot -Tpng > tfgraph.png
+
+      - name: 'Upload Plan/Scan/Graph Artifacts'
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-artifacts
+          path: |
+            platform/tfgraph.png
+            platform/tfsec-results.txt
+            platform/checkov-results.xml

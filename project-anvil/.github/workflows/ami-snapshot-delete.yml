@@ -1,0 +1,204 @@
+name: 'AMI/Snapshot Deleter'
+# ==============================================================================
+# Project Anvil - CI/CD Workflow
+# .github/workflows/ami-snapshot-delete.yml
+#
+# This workflow deletes selected AMIs and/or EBS snapshots by ID.
+# It should be triggered manually with explicit input of IDs to delete.
+# Protection: Will NOT delete any AMI that is currently set as the "latest" for its tier/environment in SSM.
+# Dry run mode is enabled by default—set dry_run to false to actually delete.
+# A full report of actions taken/skipped is uploaded as an artifact and printed to the log.
+#
+# Author: Carrick Bradley
+# Last Updated: 2025-09-25
+# ==============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      ami_ids:
+        description: 'Comma-separated list of AMI IDs to delete (e.g., ami-1234abcd,ami-5678efgh)'
+        required: false
+        type: string
+      snapshot_ids:
+        description: 'Comma-separated list of Snapshot IDs to delete (e.g., snap-1234abcd,snap-5678efgh)'
+        required: false
+        type: string
+      aws_region:
+        description: 'The AWS region for deletion.'
+        required: true
+        default: 'us-east-1'
+        type: choice
+        options:
+          - us-east-1 (N. Virginia)
+          - us-east-2 (Ohio)
+          - us-west-1 (N. California)
+          - us-west-2 (Oregon)
+          - af-south-1 (Cape Town)
+          - ap-east-1 (Hong Kong)
+          - ap-south-1 (Mumbai)
+          - ap-south-2 (Hyderabad)
+          - ap-southeast-1 (Singapore)
+          - ap-southeast-2 (Sydney)
+          - ap-southeast-3 (Jakarta)
+          - ap-southeast-4 (Melbourne)
+          - ap-northeast-1 (Tokyo)
+          - ap-northeast-2 (Seoul)
+          - ap-northeast-3 (Osaka)
+          - ca-central-1 (Canada Central)
+          - eu-central-1 (Frankfurt)
+          - eu-central-2 (Zurich)
+          - eu-west-1 (Ireland)
+          - eu-west-2 (London)
+          - eu-west-3 (Paris)
+          - eu-north-1 (Stockholm)
+          - eu-south-1 (Milan)
+          - eu-south-2 (Spain)
+          - me-south-1 (Bahrain)
+          - me-central-1 (UAE)
+          - sa-east-1 (Sao Paulo)
+      dry_run:
+        description: 'Dry run only? (true = just print what would be deleted, false = actually delete)'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  delete-amis-snapshots:
+    name: 'Delete AMIs/Snapshots'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_FOR_ANVIL }}
+          aws-region: ${{ github.event.inputs.aws_region }}
+
+      - name: 'Install jq'
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: 'Delete Selected AMIs/Snapshots (with protection, dry run, and reporting)'
+        id: deleteami
+        env:
+          AWS_REGION: ${{ github.event.inputs.aws_region }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          touch ami-delete-report.md
+          touch ami-delete-report.csv
+          touch snapshot-delete-report.md
+          touch snapshot-delete-report.csv
+
+          echo "| AMI ID | Action | Reason/Result |" > ami-delete-report.md
+          echo "|--------|--------|---------------|" >> ami-delete-report.md
+          echo "AMI ID,Action,Reason/Result" > ami-delete-report.csv
+
+          echo "| Snapshot ID | Action | Reason/Result |" > snapshot-delete-report.md
+          echo "|-------------|--------|---------------|" >> snapshot-delete-report.md
+          echo "Snapshot ID,Action,Reason/Result" > snapshot-delete-report.csv
+
+          # --- Protect latest AMIs ---
+          declare -A LATEST_AMIS
+          for tier in web app; do
+            for env in dev qa uat prod; do
+              PARAM="/anvil/ami/${tier}/latest-${env}"
+              LATEST=$(aws ssm get-parameter --name "$PARAM" --region "$AWS_REGION" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+              if [ -n "$LATEST" ]; then
+                LATEST_AMIS[$LATEST]=1
+              fi
+            done
+          done
+
+          # --- AMI Deletion ---
+          if [ -n "${{ github.event.inputs.ami_ids }}" ]; then
+            IFS=',' read -ra AMIS <<< "${{ github.event.inputs.ami_ids }}"
+            for ami in "${AMIS[@]}"; do
+              if [[ ${LATEST_AMIS[$ami]+_} ]]; then
+                echo "| $ami | SKIP | Protected as 'latest' in SSM |" >> ami-delete-report.md
+                echo "$ami,SKIP,Protected as 'latest' in SSM" >> ami-delete-report.csv
+                continue
+              fi
+              if [[ "$DRY_RUN" == "true" ]]; then
+                echo "| $ami | DRY RUN | Would deregister |" >> ami-delete-report.md
+                echo "$ami,DRY RUN,Would deregister" >> ami-delete-report.csv
+              else
+                aws ec2 deregister-image --image-id "$ami" --region "$AWS_REGION"
+                if [ $? -eq 0 ]; then
+                  echo "| $ami | DELETED | Deregistered |" >> ami-delete-report.md
+                  echo "$ami,DELETED,Deregistered" >> ami-delete-report.csv
+                else
+                  echo "| $ami | ERROR | Deregister failed |" >> ami-delete-report.md
+                  echo "$ami,ERROR,Deregister failed" >> ami-delete-report.csv
+                fi
+              fi
+            done
+          fi
+
+          # --- Associated Snapshots for AMIs ---
+          if [ -n "${{ github.event.inputs.ami_ids }}" ]; then
+            IFS=',' read -ra AMIS <<< "${{ github.event.inputs.ami_ids }}"
+            for ami in "${AMIS[@]}"; do
+              SNAP_IDS=$(aws ec2 describe-images --image-ids "$ami" --region "$AWS_REGION" --query "Images[].BlockDeviceMappings[].Ebs.SnapshotId" --output text)
+              for snap in $SNAP_IDS; do
+                if [ "$snap" != "None" ]; then
+                  if [[ "$DRY_RUN" == "true" ]]; then
+                    echo "| $snap | DRY RUN | Would delete (associated with $ami) |" >> snapshot-delete-report.md
+                    echo "$snap,DRY RUN,Would delete (associated with $ami)" >> snapshot-delete-report.csv
+                  else
+                    aws ec2 delete-snapshot --snapshot-id "$snap" --region "$AWS_REGION"
+                    if [ $? -eq 0 ]; then
+                      echo "| $snap | DELETED | Deleted (associated with $ami) |" >> snapshot-delete-report.md
+                      echo "$snap,DELETED,Deleted (associated with $ami)" >> snapshot-delete-report.csv
+                    else
+                      echo "| $snap | ERROR | Delete failed (associated with $ami) |" >> snapshot-delete-report.md
+                      echo "$snap,ERROR,Delete failed (associated with $ami)" >> snapshot-delete-report.csv
+                    fi
+                  fi
+                fi
+              done
+            done
+          fi
+
+          # --- Direct Snapshot Deletion ---
+          if [ -n "${{ github.event.inputs.snapshot_ids }}" ]; then
+            IFS=',' read -ra SNAPS <<< "${{ github.event.inputs.snapshot_ids }}"
+            for snap in "${SNAPS[@]}"; do
+              if [[ "$DRY_RUN" == "true" ]]; then
+                echo "| $snap | DRY RUN | Would delete |" >> snapshot-delete-report.md
+                echo "$snap,DRY RUN,Would delete" >> snapshot-delete-report.csv
+              else
+                aws ec2 delete-snapshot --snapshot-id "$snap" --region "$AWS_REGION"
+                if [ $? -eq 0 ]; then
+                  echo "| $snap | DELETED | Deleted |" >> snapshot-delete-report.md
+                  echo "$snap,DELETED,Deleted" >> snapshot-delete-report.csv
+                else
+                  echo "| $snap | ERROR | Delete failed |" >> snapshot-delete-report.md
+                  echo "$snap,ERROR,Delete failed" >> snapshot-delete-report.csv
+                fi
+              fi
+            done
+          fi
+
+      - name: 'Upload Delete Report Artifacts'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ami-snapshot-delete-report
+          path: |
+            ami-delete-report.md
+            ami-delete-report.csv
+            snapshot-delete-report.md
+            snapshot-delete-report.csv
+
+      - name: 'Print AMI Delete Table to Workflow Log'
+        run: |
+          echo "### AMI Delete Table"
+          cat ami-delete-report.md
+
+      - name: 'Print Snapshot Delete Table to Workflow Log'
+        run: |
+          echo "### Snapshot Delete Table"
+          cat snapshot-delete-report.md

@@ -1,0 +1,169 @@
+name: 'AMI Builder'
+# ==============================================================================
+# Project Anvil - CI/CD Workflow
+# .github/workflows/ami-builder.yml
+#
+# This workflow is responsible for building and publishing golden AMIs (Amazon
+# Machine Images) for both web and app server tiers. It uses Packer to create
+# immutable images, includes vulnerability scanning (Trivy), and stores the
+# resulting AMI IDs in AWS SSM Parameter Store for consumption by deployment
+# pipelines.
+#
+# Author: Carrick Bradley
+# Last Updated: 2025-09-24
+# ==============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: 'The target environment (dev, qa, uat, prod) for which this AMI is primarily built.'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - uat
+          - prod
+      aws_region: # Added workflow input for region
+        description: 'The AWS region where AMIs will be built and published.'
+        required: false
+        default: 'us-east-1' # Default for manual runs if not provided
+        type: string
+
+permissions:
+  id-token: write # Required for OIDC authentication with AWS
+  contents: read  # Required to checkout code
+
+jobs:
+  package-application:
+    name: '1. Create Application Packages'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Make Packaging Script Executable'
+        run: chmod +x ./ami-builder/scripts/create_packages.sh
+
+      - name: 'Run Packaging Script'
+        id: package
+        run: ./ami-builder/scripts/create_packages.sh
+
+      - name: 'Archive Packages for Build Job'
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: dist/
+          retention-days: 1
+
+  build-and-store-amis:
+    name: '2. Build, Scan & Store AMIs'
+    needs: package-application
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        tier: [web, app]
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Download Packaged Artifacts'
+        uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: ./dist
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_FOR_PACKER }}
+          aws-region: ${{ github.event.inputs.aws_region }} # Use workflow input
+
+      - name: 'Setup Packer'
+        uses: hashicorp/setup-packer@main
+        with:
+          version: 'latest'
+
+      - name: 'Initialize Packer for ${{ matrix.tier }}'
+        run: |
+          cd ami-builder/packer
+          packer init ${{ matrix.tier }}-server.pkr.hcl
+
+      - name: 'Build AMI for ${{ matrix.tier }} Tier'
+        id: build
+        env:
+          PKR_VAR_target_env: ${{ github.event.inputs.target_environment }}
+          PKR_VAR_tier: ${{ matrix.tier }}
+          PKR_VAR_git_commit: ${{ github.sha }}
+          PKR_VAR_github_actor: ${{ github.actor }}
+          PKR_VAR_aws_region: ${{ github.event.inputs.aws_region }} # Pass region to Packer
+        run: |
+          PACKER_LOG=1 packer build -machine-readable ami-builder/packer/${{ matrix.tier }}-server.pkr.hcl 2>&1 | tee packer-output.log
+
+          AMI_ID=$(awk -F, '/artifact,0,id,/ {print $6}' packer-output.log | awk -F: '{print $2}' | tail -1)
+
+          if [ -z "$AMI_ID" ]; then
+            echo "Error: Failed to extract AMI ID from Packer output." >&2
+            echo "Last 40 lines of packer-output.log for debugging:\""
+            tail -40 packer-output.log
+            exit 1
+          fi
+
+          echo "New AMI ID for ${{ matrix.tier }} is: $AMI_ID"
+          echo "AMI_ID=$AMI_ID" >> $GITHUB_ENV
+          echo "$AMI_ID" > ami-id-${{ matrix.tier }}.txt
+
+      - name: 'Clean Up Build Artifacts'
+        run: |
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo rm -rf /tmp/*
+          sudo rm -rf /var/tmp/*
+          # Remove Packer cache if present
+          rm -rf ~/.packer.d/packer_cache
+          # Remove any other temp files you know are created by your scripts
+
+      - name: 'Upload Packer Build Logs'
+        uses: actions/upload-artifact@v4
+        with:
+          name: packer-build-logs-${{ matrix.tier }}
+          path: |
+            packer-output.log
+            ami-builder/packer/packer-output.log
+          retention-days: 3
+
+      - name: 'Store AMI ID in SSM Parameter Store with Git Commit Hash'
+        run: |
+          GIT_HASH=$(git rev-parse --short HEAD)
+          SSM_PARAMETER_NAME_HASH="/anvil/ami/${{ matrix.tier }}/$GIT_HASH"
+          echo "Storing AMI ID (${{ env.AMI_ID }}) in SSM Parameter: $SSM_PARAMETER_NAME_HASH"
+          aws ssm put-parameter \
+            --name "$SSM_PARAMETER_NAME_HASH" \
+            --value "${{ env.AMI_ID }}" \
+            --type "String" \
+            --description "Golden AMI for ${{ matrix.tier }} tier, built from commit $GIT_HASH for the ${{ github.event.inputs.target_environment }} environment" \
+            --overwrite \
+            --region ${{ github.event.inputs.aws_region }} # Use workflow input for region
+
+      - name: 'Update SSM Parameter Store with Latest AMI ID for Environment'
+        run: |
+          SSM_PARAMETER_NAME_LATEST="/anvil/ami/${{ matrix.tier }}/latest-${{ github.event.inputs.target_environment }}"
+          echo "Updating latest AMI ID (${{ env.AMI_ID }}) in SSM Parameter: $SSM_PARAMETER_NAME_LATEST"
+          aws ssm put-parameter \
+            --name "$SSM_PARAMETER_NAME_LATEST" \
+            --value "${{ env.AMI_ID }}" \
+            --type "String" \
+            --description "Latest Golden AMI for ${{ matrix.tier }} tier for ${{ github.event.inputs.target_environment }} environment" \
+            --overwrite \
+            --region ${{ github.event.inputs.aws_region }} # Use workflow input for region
+
+      - name: 'Upload AMI ID Artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ami-id-${{ matrix.tier }}
+          path: ami-id-${{ matrix.tier }}.txt
+          retention-days: 1

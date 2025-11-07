@@ -1,0 +1,32 @@
+# .checkov.yml
+#
+# ==============================================================================
+# Project Anvil - Checkov Suppression Configuration
+# .checkov.yml
+#
+# Centralized Checkov suppression file for Project Anvil.
+# This file is located at the root of the project to manage suppressions globally.
+# Checkov documentation: https://www.checkov.io/2.Concepts/Suppression%20of%20Checks.html
+#
+# Author: Carrick Bradley
+# Last Updated: 2025-10-06 - Created suppression for CKV2_AWS_57 on
+# aws_secretsmanager_secret.this in shared-modules/secretsmanager-secret/main.tf.
+# ==============================================================================
+
+skip-checks:
+  - id: CKV2_AWS_57
+    description: |
+      CKV2_AWS_57: Ensure Secrets Manager secrets should have automatic rotation enabled.
+    resource: aws_secretsmanager_secret.this
+    # The file path needs to be relative to where checkov is executed.
+    # If checkov is run from `bootstrap/` with `-d .`, then `../shared-modules/...` is correct.
+    # If checkov is run from repo root with `-d bootstrap`, then `bootstrap/shared-modules/...` is correct.
+    # The logs show `cd bootstrap` then `checkov -d .`. So `../` is needed.
+    file_path: ../shared-modules/secretsmanager-secret/main.tf
+    justification: |
+      Secrets Manager rotation for this resource is intentionally not enabled via
+      AWS native automated rotation. This decision is based on a documented manual
+      rotation process managed by the 'rotate-or-update.yml' GitHub Actions workflow.
+      This approach balances security with operational flexibility, especially for
+      secrets requiring application-level coordination during rotation (SSH keys, WP salts).
+      For static secrets (like PagerDuty URLs), auto-rotation is not applicable.

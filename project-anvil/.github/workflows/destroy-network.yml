@@ -1,0 +1,181 @@
+name: 'Destroy Network Infra'
+# ==============================================================================
+# Project Anvil - CI/CD Workflow
+# .github/workflows/destroy-network.yml
+#
+# This workflow is designed to destroy the 'network' layer for Project Anvil.
+# It tears down the core networking infrastructure including VPC, subnets,
+# NAT Gateways, and Route 53 DNS records.
+#
+# This is a highly destructive action and should only be triggered manually
+# with extreme caution. **Ensure all dependent layers (platform, apps) are**
+# **destroyed first, or this workflow may fail.**
+#
+# Author: Carrick Bradley
+# Last Updated: 2025-09-24
+# ==============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: 'The target environment (dev, qa, uat, prod) for which to destroy network resources.'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - uat
+          - prod
+      aws_region: # Workflow input for region
+        description: 'The AWS region where network resources are deployed.'
+        required: false
+        default: 'us-east-1' # Default for manual runs if not provided
+        type: string
+      change_ticket:
+        description: 'Enter the JIRA or change ticket number for this deployment.'
+        required: true
+        type: string
+      confirm_destroy:
+        description: 'Type "yes" (without quotes) to confirm destruction. THIS IS HIGHLY DESTRUCTIVE!'
+        required: true
+        type: string
+
+permissions:
+  id-token: write # Required for OIDC authentication with AWS
+  contents: read  # Required to checkout code
+
+jobs:
+  confirm-and-destroy:
+    name: 'Confirm & Destroy Network Layer'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target_environment }} # Use GitHub Environments for protection
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_FOR_ANVIL }}
+          aws-region: ${{ github.event.inputs.aws_region }} # Use workflow input
+
+      - name: 'Setup Terraform'
+        uses: hashicorp/setup-terraform@v3
+
+      - name: 'Terraform Init - Network Backend for Destroy'
+        run: |
+          ENV_NAME="${{ github.event.inputs.target_environment }}"
+          AWS_REGION="${{ github.event.inputs.aws_region }}"
+
+          # These backend names are created by the bootstrap layer.
+          NETWORK_BUCKET_NAME="acmelabs-terraform-state-network-${ENV_NAME}"
+          NETWORK_KEY="terraform.tfstate"
+          NETWORK_DDB_TABLE_NAME="acmelabs-terraform-lock-table-network-${ENV_NAME}"
+
+          cd network # Change to the network directory
+          terraform init \
+            -backend-config="bucket=${NETWORK_BUCKET_NAME}" \
+            -backend-config="key=${NETWORK_KEY}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${NETWORK_DDB_TABLE_NAME}" \
+            -backend-config="encrypt=true"
+
+      - name: 'Generate Terraform Destroy Graph'
+        run: |
+          cd network
+          terraform graph -destroy | dot -Tpng > tfgraph-destroy.png
+
+      - name: 'Upload Destroy Graph Artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-destroy-graph
+          path: network/tfgraph-destroy.png
+
+      - name: 'Verify Destruction Confirmation'
+        run: |
+          if [ "${{ github.event.inputs.confirm_destroy }}" != "yes" ]; then
+            echo "::error::Destruction not confirmed. Please type 'yes' in the 'confirm_destroy' input to proceed."
+            exit 1
+          fi
+        shell: bash
+
+      - name: 'Terraform Refresh (Synchronize State)'
+        run: |
+          cd network
+          terraform refresh \
+            -var="aws_region=${{ github.event.inputs.aws_region }}" \
+            -var="environment_name=${{ github.event.inputs.target_environment }}" \
+            -var="build_timestamp=$(date -u +%Y%m%d%H%M%S)" \
+            -var="project_name=project-anvil" \
+            -var="vpc_cidr=10.0.0.0/16" \
+            -var="public_subnet_cidrs=[\"10.0.1.0/24\", \"10.0.2.0/24\", \"10.0.3.0/24\"]" \
+            -var="private_subnet_cidrs=[\"10.0.11.0/24\", \"10.0.12.0/24\", \"10.0.13.0/24\"]" \
+            -var="db_subnet_cidrs=[\"10.0.21.0/24\", \"10.0.22.0/24\", \"10.0.23.0/24\"]" \
+            -var="availability_zones=[\"us-east-1a\", \"us-east-1b\", \"us-east-1c\"]" \
+            -var="route53_zone_id=Z0123456789ABCDEF01234" \
+            -var="shared_dns_records={}" \
+            -var-file="../terraform.tfvars" # Load global project variables
+        continue-on-error: true # Allow refresh to fail if resources are already mostly gone
+
+      - name: 'Check for Change Ticket'
+        run: |
+          if [ -z "${{ github.event.inputs.change_ticket }}" ]; then
+            echo "::error::No change ticket provided. Aborting destroy operation."
+            exit 1
+          fi
+
+      - name: 'Log Change Ticket Number'
+        run: |
+          echo "Change Ticket/JIRA: ${{ github.event.inputs.change_ticket }}"          
+
+      - name: 'Display Manual Cleanup Note and List prevent_destroy Resources'
+        if: always()
+        run: |
+          echo "################################################################"
+          echo "## !!! IMPORTANT MANUAL CLEANUP NOTE !!!"
+          echo "################################################################"
+          echo "Terraform 'destroy' will attempt to remove all resources managed"
+          echo "by the 'bootstrap' layer. However, resources configured with"
+          echo "'prevent_destroy = true' (if any) or those created outside of"
+          echo "Terraform will NOT be removed. Please verify manually if a full"
+          echo "teardown is desired."
+          echo "################################################################"
+          echo ""
+          echo "################################################################"
+          echo "## The following resources are protected with prevent_destroy = true"
+          echo "## and must be deleted manually in AWS if you want a full wipe."
+          echo "################################################################"
+          cd bootstrap
+          # List all resources in state and try to find prevent_destroy in their definition
+          terraform state list | while read -r resource; do
+            # Try to find the .tf file containing the resource definition
+            # This assumes resource type and name are in the format type.name
+            TYPE="${resource%%.*}"
+            NAME="${resource#*.}"
+            # Search for resource "type" "name" in any .tf file
+            FILE=$(grep -rl "resource[[:space:]]*\"$TYPE\"[[:space:]]*\"$NAME\"" .. 2>/dev/null | head -n1 || true)
+            if [ -n "$FILE" ] && grep -q "prevent_destroy *= *true" "$FILE"; then
+              echo "  $resource (defined in $FILE)"
+            fi
+          done
+          echo "  [Why these didn't delete automatically: Terraform is configured to protect these resources. Remove prevent_destroy and destroy manually if you are sure.]"
+        shell: bash
+
+      - name: 'Terraform Destroy - Network Layer'
+        run: |
+          cd network
+          terraform destroy -auto-approve \
+            -var="aws_region=${{ github.event.inputs.aws_region }}" \
+            -var="environment_name=${{ github.event.inputs.target_environment }}" \
+            -var="build_timestamp=$(date -u +%Y%m%d%H%M%S)" \
+            -var="project_name=project-anvil" \
+            -var="vpc_cidr=10.0.0.0/16" \
+            -var="public_subnet_cidrs=[\"10.0.1.0/24\", \"10.0.2.0/24\", \"10.0.3.0/24\"]" \
+            -var="private_subnet_cidrs=[\"10.0.11.0/24\", \"10.0.12.0/24\", \"10.0.13.0/24\"]" \
+            -var="db_subnet_cidrs=[\"10.0.21.0/24\", \"10.0.22.0/24\", \"10.0.23.0/24\"]" \
+            -var="availability_zones=[\"us-east-1a\", \"us-east-1b\", \"us-east-1c\"]" \
+            -var="route53_zone_id=Z0123456789ABCDEF01234" \
+            -var="shared_dns_records={}" \
+            -var-file="../terraform.tfvars" # Load global project variables

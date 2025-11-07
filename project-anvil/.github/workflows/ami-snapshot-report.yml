@@ -1,0 +1,103 @@
+name: 'AMI/Snapshot Lifecycle Report'
+# ==============================================================================
+# Project Anvil - CI/CD Workflow
+# .github/workflows/ami-lifecycle-report.yml
+#
+# This workflow generates a report of all AMIs and EBS snapshots owned by your AWS account,
+# including their creation date, state, size, and tags. The report is uploaded as
+# an artifact (CSV and markdown table).
+#
+# Author: Carrick Bradley
+# Last Updated: 2025-09-25
+# ==============================================================================
+
+on:
+  workflow_dispatch: # Manual trigger
+  schedule:
+    - cron: '0 0 * * *' # Every day at 00:00 UTC (midnight)
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  report-ami-snapshots:
+    name: 'Generate AMI/Snapshot Report'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_FOR_ANVIL }}
+          aws-region: us-east-1 # or your preferred region
+
+      - name: 'Install jq'
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: 'Query AMIs and Snapshots'
+        run: |
+          # Get all AMIs owned by this account
+          aws ec2 describe-images --owners self > ami-list.json
+
+          # Get all EBS snapshots owned by this account
+          aws ec2 describe-snapshots --owner-ids $(aws sts get-caller-identity --query "Account" --output text) > snapshot-list.json
+
+      - name: 'Generate AMI Report (Markdown and CSV)'
+        run: |
+          echo "| AMI ID | Name | State | Created | Size (GiB) | Tags | Description |" > ami-report.md
+          echo "|--------|------|-------|---------|------------|------|-------------|" >> ami-report.md
+          echo "AMI ID,Name,State,Created,Size (GiB),Tags,Description" > ami-report.csv
+
+          jq -r '.Images[] | [.ImageId, (.Name // "-"), .State, .CreationDate, (.BlockDeviceMappings[0].Ebs.VolumeSize // "-"), 
+            (if .Tags then (.Tags | map("\(.Key)=\(.Value)") | join(";")) else "-" end), 
+            (.Description // "-")] 
+            | @tsv' ami-list.json | while IFS=$'\t' read -r id name state created size tags desc; do
+            printf "| %s | %s | %s | %s | %s | %s | %s |\n" "$id" "$name" "$state" "$created" "$size" "$tags" "$desc" >> ami-report.md
+            printf "%s,%s,%s,%s,%s,%s,%s\n" "$id" "$name" "$state" "$created" "$size" "$tags" "$desc" >> ami-report.csv
+          done
+
+          echo "" >> ami-report.md
+          echo "Total AMIs: $(jq '.Images | length' ami-list.json)" >> ami-report.md
+
+      - name: 'Generate Snapshot Report (Markdown and CSV)'
+        run: |
+          echo "| Snapshot ID | Volume ID | State | Created | Size (GiB) | Tags | Description |" > snapshot-report.md
+          echo "|-------------|-----------|-------|---------|------------|------|-------------|" >> snapshot-report.md
+          echo "Snapshot ID,Volume ID,State,Created,Size (GiB),Tags,Description" > snapshot-report.csv
+
+          jq -r '.Snapshots[] | [.SnapshotId, (.VolumeId // "-"), .State, .StartTime, .VolumeSize, 
+            (if .Tags then (.Tags | map("\(.Key)=\(.Value)") | join(";")) else "-" end), 
+            (.Description // "-")] 
+            | @tsv' snapshot-list.json | while IFS=$'\t' read -r id vol state created size tags desc; do
+            printf "| %s | %s | %s | %s | %s | %s | %s |\n" "$id" "$vol" "$state" "$created" "$size" "$tags" "$desc" >> snapshot-report.md
+            printf "%s,%s,%s,%s,%s,%s,%s\n" "$id" "$vol" "$state" "$created" "$size" "$tags" "$desc" >> snapshot-report.csv
+          done
+
+          echo "" >> snapshot-report.md
+          echo "Total Snapshots: $(jq '.Snapshots | length' snapshot-list.json)" >> snapshot-report.md
+
+      - name: 'Upload AMI/Snapshot Reports'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ami-snapshot-report
+          path: |
+            ami-report.md
+            ami-report.csv
+            snapshot-report.md
+            snapshot-report.csv
+            ami-list.json
+            snapshot-list.json
+
+      - name: 'Print AMI Table to Workflow Log'
+        run: |
+          echo "### AMI Inventory Table"
+          cat ami-report.md
+
+      - name: 'Print Snapshot Table to Workflow Log'
+        run: |
+          echo "### Snapshot Inventory Table"
+          cat snapshot-report.md

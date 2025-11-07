@@ -1,0 +1,239 @@
+name: 'Destroy Bootstrap Infra'
+# ==============================================================================
+# Project Anvil - CI/CD Workflow
+# .github/workflows/destroy-bootstrap.yml
+#
+# This workflow destroys the foundational 'bootstrap' layer for a specified
+# environment. It removes S3 buckets for Terraform state, DynamoDB tables for
+# state locking, and core secret containers. Resources with prevent_destroy=true
+# will NOT be deleted and require manual intervention.
+#
+# Author: Carrick Bradley
+# Last Updated: 2025-10-09 - Per-env destroy, robust, remote state, error handling
+# ==============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: 'The target environment (dev, qa, uat, prod) for which to destroy bootstrap resources.'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - uat
+          - prod
+      aws_region:
+        description: 'The AWS region where foundational resources are deployed.'
+        required: false
+        default: 'us-east-1'
+        type: string
+      change_ticket:
+        description: 'Enter the JIRA or change ticket number for this deployment.'
+        required: true
+        type: string
+      confirm_destroy:
+        description: 'Type "yes" (without quotes) to confirm destruction. THIS IS HIGHLY DESTRUCTIVE!'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  confirm-and-destroy:
+    name: 'Confirm & Destroy Bootstrap Layer'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target_environment }}
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_FOR_BOOTSTRAP }}
+          aws-region: ${{ github.event.inputs.aws_region }}
+
+      - name: 'Install graphviz (for terraform graph)'
+        run: sudo apt-get update && sudo apt-get install -y graphviz
+
+      - name: 'Setup Terraform'
+        uses: hashicorp/setup-terraform@v3
+
+      - name: 'Terraform Init - Bootstrap Backend for Destroy'
+        run: |
+          ENV_NAME="${{ github.event.inputs.target_environment }}"
+          AWS_REGION="${{ github.event.inputs.aws_region }}"
+
+          BOOTSTRAP_BUCKET_NAME="acmelabs-terraform-state-bootstrap-${ENV_NAME}"
+          BOOTSTRAP_KEY="terraform.tfstate"
+          BOOTSTRAP_DDB_TABLE_NAME="acmelabs-terraform-lock-table-bootstrap-${ENV_NAME}"
+
+          cd bootstrap
+          terraform init \
+            -backend-config="bucket=${BOOTSTRAP_BUCKET_NAME}" \
+            -backend-config="key=${BOOTSTRAP_KEY}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${BOOTSTRAP_DDB_TABLE_NAME}" \
+            -backend-config="encrypt=true"
+
+      - name: 'Generate Terraform Destroy Graph'
+        run: |
+          cd bootstrap
+          terraform graph -type=plan-destroy | dot -Tpng > tfgraph-destroy.png
+
+      - name: 'Upload Destroy Graph Artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-destroy-graph
+          path: bootstrap/tfgraph-destroy.png
+
+      - name: 'Verify Destruction Confirmation'
+        run: |
+          if [ "${{ github.event.inputs.confirm_destroy }}" != "yes" ]; then
+            echo "::error::Destruction not confirmed. Please type 'yes' in the 'confirm_destroy' input to proceed."
+            exit 1
+          fi
+        shell: bash
+
+      - name: 'Terraform Refresh (Synchronize State)'
+        run: |
+          cd bootstrap
+          terraform refresh \
+            -var="aws_region=${{ github.event.inputs.aws_region }}" \
+            -var="environment_name=${{ github.event.inputs.target_environment }}" \
+            -var="environments=[\"${{ github.event.inputs.target_environment }}\"]" \
+            -var="build_timestamp=$(date -u +%Y%m%d%H%M%S)" \
+            -var="project_name=project-anvil" \
+            -var="cms_name=wordpress" \
+            -var="domain_name=acmelabs.cloud" \
+            -var="web_subdomain=www" \
+            -var="organization_name=\"AcmeLabs Inc.\"" \
+            -var="ca_validity_period_years=10" \
+            -var="github_org=AcmeLabsCloud" \
+            -var="github_repo=project-anvil" \
+            -var-file="../terraform.tfvars"
+        continue-on-error: false
+
+      - name: 'Check for Change Ticket'
+        run: |
+          if [ -z "${{ github.event.inputs.change_ticket }}" ]; then
+            echo "::error::No change ticket provided. Aborting destroy operation."
+            exit 1
+          fi
+
+      - name: 'Log Change Ticket Number'
+        run: |
+          echo "Change Ticket/JIRA: ${{ github.event.inputs.change_ticket }}"
+
+      - name: 'Display Manual Cleanup Note and List Protected Resources with Commands'
+        if: always()
+        continue-on-error: false
+        run: |
+          ENV="${{ github.event.inputs.target_environment }}"
+          AWS_REGION="${{ github.event.inputs.aws_region }}"
+
+          echo "################################################################"
+          echo "## !!! IMPORTANT MANUAL CLEANUP NOTE !!!"
+          echo "################################################################"
+          echo "Terraform 'destroy' will attempt to remove all resources managed"
+          echo "by the 'bootstrap' layer EXCEPT those protected by 'prevent_destroy = true',"
+          echo "or not managed by Terraform (such as SSM Parameters, KMS keys, Secrets)."
+          echo ""
+          echo "The following resources MUST be deleted manually in AWS for a full wipe."
+          echo "################################################################"
+          echo ""
+
+          cd bootstrap
+
+          echo "### Resources with 'prevent_destroy = true' (Terraform addresses, AWS resource info):"
+          terraform state list | while read -r resource; do
+            TYPE="${resource%%.*}"
+            NAME="${resource#*.}"
+            FILE=$(grep -rl "resource[[:space:]]*\\\"$TYPE\\\"[[:space:]]*\\\"$NAME\\\"" .. 2>/dev/null | head -n1 || true)
+            if [ -n "$FILE" ] && grep -q "prevent_destroy *= *true" "$FILE"; then
+              echo "  $resource (defined in $FILE)"
+              ID_LINE=$(terraform state show -no-color "$resource" | grep -E '(^id = |bucket = |name = )' | head -n1)
+              [ -n "$ID_LINE" ] && echo "    AWS: $ID_LINE"
+            fi
+          done
+          echo ""
+
+          echo "### S3 Buckets with 'prevent_destroy = true' (manual deletion required):"
+          for bucket in \
+            "acmelabs-terraform-state-bootstrap-${ENV}" \
+            "acmelabs-central-logs" \
+            "acmelabs-central-logs-self-access-logs" \
+            "acmelabs-audit-access-logs" \
+            "acmelabs-vulnerability-reports-${ENV}"
+          do
+            if aws s3api head-bucket --bucket "$bucket" --region "$AWS_REGION" 2>/dev/null; then
+              echo "  $bucket"
+              echo "    Empty bucket:"
+              echo "      aws s3 rm s3://$bucket --recursive --region $AWS_REGION"
+              echo "    Delete bucket:"
+              echo "      aws s3 rb s3://$bucket --force --region $AWS_REGION"
+            fi
+          done
+          echo ""
+
+          echo "### DynamoDB Tables with 'prevent_destroy = true' (manual deletion required):"
+          for table in \
+            "acmelabs-terraform-lock-table-bootstrap-${ENV}" \
+            "acmelabs-terraform-lock-table-${ENV}"
+          do
+            if aws dynamodb describe-table --table-name "$table" --region "$AWS_REGION" 2>/dev/null; then
+              echo "  $table"
+              echo "    Delete table:"
+              echo "      aws dynamodb delete-table --table-name $table --region $AWS_REGION"
+            fi
+          done
+          echo ""
+
+          echo "### SSM Parameter resources (aws_ssm_parameter):"
+          aws ssm describe-parameters --region "$AWS_REGION" \
+            --query "Parameters[?contains(Name, '$ENV')].[Name,ARN]" --output text | \
+            while read -r name arn; do
+              if [ -n "$name" ]; then
+                echo "  $name ($arn)"
+                echo "    Delete parameter:"
+                echo "      aws ssm delete-parameter --name $name --region $AWS_REGION"
+              fi
+            done
+          echo ""
+
+          echo "### Customer-managed KMS keys and aliases (aws_kms_key, aws_kms_alias):"
+          aws kms list-aliases --region "$AWS_REGION" \
+            --query "Aliases[?contains(AliasName, '$ENV')].[AliasName,TargetKeyId]" --output text | \
+            while read -r alias keyid; do
+              if [ -n "$keyid" ]; then
+                echo "  $alias ($keyid)"
+                echo "    Schedule key deletion (7 days):"
+                echo "      aws kms schedule-key-deletion --key-id $keyid --pending-window-in-days 7 --region $AWS_REGION"
+              fi
+            done
+          echo ""
+
+          echo "### AWS Secrets Manager secrets (aws_secretsmanager_secret):"
+          aws secretsmanager list-secrets --region "$AWS_REGION" \
+            --query "SecretList[?contains(Name, '$ENV')].[Name,ARN]" --output text | \
+            while read -r name arn; do
+              if [ -n "$arn" ]; then
+                echo "  $name ($arn)"
+                echo "    Delete secret (7 days, force immediate):"
+                echo "      aws secretsmanager delete-secret --secret-id $arn --force-delete-without-recovery --region $AWS_REGION"
+              fi
+            done
+          echo ""
+
+          echo "################################################################"
+          echo "## Review the above list and run the AWS CLI commands as shown."
+          echo "## S3 buckets must be emptied before deletion."
+          echo "## KMS keys and Secrets Manager secrets will be scheduled for deletion (7 days)."
+          echo "## SSM Parameters and DynamoDB tables can be deleted immediately."
+          echo "################################################################"
+        shell: bash

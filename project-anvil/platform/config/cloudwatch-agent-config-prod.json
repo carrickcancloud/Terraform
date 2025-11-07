@@ -1,0 +1,37 @@
+# ==============================================================================
+# Project Anvil - Platform Layer
+# config/cloudwatch-agent-config-prod.json
+#
+# CloudWatch Agent configuration template for the 'prod' environment.
+# This file defines metrics and logs to be collected by the agent.
+# It is stored in SSM Parameter Store by the platform layer's main.tf,
+# from which EC2 instances in the 'prod' environment fetch their configuration.
+#
+# Author: Carrick Bradley
+# Last Updated: 2025-09-24
+# ==============================================================================
+{
+  "agent" : {
+    "logfile" : "/opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log",
+    "metrics_collection_interval" : 60
+  },
+  "metrics" : {
+    "metrics_collected" : {
+      "cpu" : {
+        "resources" : [
+          "*"
+        ],
+        "metrics_collection_interval" : 60,
+        "measurement" : [
+          "cpu_usage_idle",
+          "cpu_usage_iowait",
+          "cpu_usage_user",
+          "cpu_usage_system"
+        ]
+      }
+    },
+    "append_dimensions" : {
+      "InstanceId" : "${aws:InstanceId}"
+    }
+  }
+}

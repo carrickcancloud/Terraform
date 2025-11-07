@@ -1,0 +1,261 @@
+name: 'Rotate Secrets or Keys'
+# ==============================================================================
+# Project Anvil - CI/CD Workflow
+# .github/workflows/rotate-or-update.yml
+#
+# This workflow provides a manual trigger for rotating SSH private keys,
+# updating WordPress salts, or setting/updating PagerDuty integration URLs.
+# It leverages Secrets Manager and SSM Parameter Store, with appropriate IAM
+# roles for secure operations.
+#
+# Author: Carrick Bradley
+# Last Updated: 2025-09-24
+# ==============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: 'Target environment (dev, qa, uat, prod) for the operation.'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - uat
+          - prod
+      aws_region:
+        description: 'The AWS region where secrets are located.'
+        required: false
+        default: 'us-east-1'
+        type: string
+      change_ticket:
+        description: 'Enter the JIRA or change ticket number for this deployment.'
+        required: true
+        type: string
+      rotate_ssh_keys:
+        description: 'Rotate SSH private key? (Generates new key pair, updates AWS Key Pair and Secrets Manager).'
+        required: false
+        type: boolean
+        default: false
+      rotate_wp_salts:
+        description: 'Rotate WordPress salts? (Generates new salts, updates Secrets Manager. WARNING: Logs out all WordPress users).'
+        required: false
+        type: boolean
+        default: false
+      update_pagerduty_url:
+        description: 'Set/Update PagerDuty integration URL? (Requires a new URL to be provided).'
+        required: false
+        type: boolean
+        default: false
+      pagerduty_url_value:
+        description: 'New PagerDuty URL (Required if "Update PagerDuty URL" is true).'
+        required: false
+        type: password
+
+permissions:
+  id-token: write # Required for OIDC authentication with AWS
+  contents: read  # Required to checkout code
+
+jobs:
+  rotate-or-update-secrets:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target_environment }} # Explicitly targets the environment for protection rules
+
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v4
+
+      - name: 'Configure AWS Credentials'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # This role needs permissions to manage Secrets Manager (Get, Put, Describe)
+          # and potentially IAM (for SSH key rotation).
+          # Assuming 'AWS_IAM_ROLE_FOR_ANVIL' has broad enough access, or create a specific role.
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_FOR_ANVIL }}
+          aws-region: ${{ github.event.inputs.aws_region }}
+
+      - name: 'Install jq (if not already present)'
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      # --- Safeguards: Code Quality & Security (Fail Fast) ---
+      - name: 'Install graphviz (for terraform graph)'
+        run: sudo apt-get update && sudo apt-get install -y graphviz
+
+      - name: 'Install TFLint'
+        run: curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+
+      - name: 'Install tfsec'
+        run: curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/install_linux.sh | bash
+
+      - name: 'Install Checkov'
+        run: pip install checkov
+
+      - name: 'Terraform Format Check'
+        run: |
+          cd terraform/rotate-or-update || cd . # Change to the correct directory if needed
+          terraform fmt -recursive -check -diff || \
+          (echo "::error::Terraform code is not formatted. Run 'terraform fmt -recursive' locally to fix." && exit 1)
+
+      - name: 'Run TFLint'
+        run: |
+          cd terraform/rotate-or-update || cd .
+          tflint --init
+          tflint --recursive
+        continue-on-error: false # Set to 'true' in non-prod for leniency
+
+      - name: 'Run tfsec Security Scan'
+        run: |
+          cd terraform/rotate-or-update || cd .
+          tfsec --format default --out tfsec-results.txt
+        continue-on-error: false # Set to 'true' in non-prod for leniency
+
+      - name: 'Run Checkov Scan'
+        run: |
+          cd terraform/rotate-or-update || cd .
+          checkov -d . --compact --framework terraform --output junit --output-file checkov-results.xml
+        continue-on-error: false # Set to 'true' in non-prod for leniency
+
+      - name: 'Generate Terraform Graph'
+        run: |
+          cd terraform/rotate-or-update || cd .
+          terraform graph | dot -Tpng > tfgraph.png
+
+      - name: 'Upload Plan/Scan/Graph Artifacts'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rotate-or-update-artifacts
+          path: |
+            terraform/rotate-or-update/tfgraph.png
+            terraform/rotate-or-update/tfsec-results.txt
+            terraform/rotate-or-update/checkov-results.xml
+
+      - name: 'Check for Change Ticket'
+        run: |
+          if [ -z "${{ github.event.inputs.change_ticket }}" ]; then
+            echo "::error::No change ticket provided. Aborting destroy operation."
+            exit 1
+          fi
+
+      - name: 'Log Change Ticket Number'
+        run: |
+          echo "Change Ticket/JIRA: ${{ github.event.inputs.change_ticket }}"
+
+      - name: 'Perform Rotation/Update Operations'
+        run: |
+          set -euo pipefail
+          ENV="${{ github.event.inputs.target_environment }}"
+          AWS_REGION="${{ github.event.inputs.aws_region }}"
+
+          echo "--- Starting Secret/Key Rotation/Update for Environment: $ENV ---"
+
+          # --------------------------------------------------------------------
+          # Validate Secret Containers Exist (Optional but recommended check)
+          # These containers are created by the 'bootstrap' layer.
+          # --------------------------------------------------------------------
+          SECRET_CONTAINERS_MISSING=0
+
+          # Check SSH Key Secret container
+          if ! aws secretsmanager describe-secret --secret-id "acmelabs-ssh-private-key-$ENV" --region "$AWS_REGION" 2>/dev/null; then
+            echo "::error::SSH private key secret container 'acmelabs-ssh-private-key-$ENV' is missing. Run the bootstrap deployment for '$ENV' first."
+            SECRET_CONTAINERS_MISSING=1
+          fi
+
+          # Check WordPress Salts Secret container
+          if ! aws secretsmanager describe-secret --secret-id "acmelabs-website-${ENV}-wordpress-salts" --region "$AWS_REGION" 2>/dev/null; then
+            echo "::error::WordPress salts secret container 'acmelabs-website-${ENV}-wordpress-salts' is missing. Run the bootstrap deployment for '$ENV' first."
+            SECRET_CONTAINERS_MISSING=1
+          fi
+
+          # Check PagerDuty Secret container
+          if ! aws secretsmanager describe-secret --secret-id "acmelabs-website-${ENV}-pagerduty-url" --region "$AWS_REGION" 2>/dev/null; then
+            echo "::error::PagerDuty secret container 'acmelabs-website-${ENV}-pagerduty-url' is missing. Run the bootstrap deployment for '$ENV' first."
+            SECRET_CONTAINERS_MISSING=1
+          fi
+
+          if [ "$SECRET_CONTAINERS_MISSING" -eq 1 ]; then
+            echo "::error::One or more required secret containers are missing. Aborting operation."
+            exit 1
+          fi
+          echo "All required secret containers found. Proceeding with operations."
+
+          # --------------------------------------------------------------------
+          # 1. Rotate SSH Private Key
+          # --------------------------------------------------------------------
+          if [ "${{ github.event.inputs.rotate_ssh_keys }}" = "true" ]; then
+            echo "--- Rotating SSH private key for $ENV ---"
+            
+            # Generate new SSH key pair locally
+            ssh-keygen -t rsa -b 4096 -f new_ssh_key.pem -N "" -q
+            NEW_PUBLIC_KEY=$(cat new_ssh_key.pem.pub)
+            NEW_PRIVATE_KEY=$(cat new_ssh_key.pem)
+
+            # Update AWS Key Pair
+            # Delete old key first (ensure it exists)
+            aws ec2 delete-key-pair --key-name "acmelabs-$ENV-key" --region "$AWS_REGION" || true
+            aws ec2 import-key-pair --key-name "acmelabs-$ENV-key" --public-key-material "$NEW_PUBLIC_KEY" --region "$AWS_REGION"
+            echo "AWS Key Pair 'acmelabs-$ENV-key' updated."
+
+            # Update private key in Secrets Manager
+            aws secretsmanager put-secret-value \
+              --secret-id "acmelabs-ssh-private-key-$ENV" \
+              --secret-string "$NEW_PRIVATE_KEY" \
+              --region "$AWS_REGION"
+            echo "SSH private key secret 'acmelabs-ssh-private-key-$ENV' updated."
+
+            # Clean up local temporary files
+            rm -f new_ssh_key.pem new_ssh_key.pem.pub
+            echo "SSH key rotation complete for $ENV."
+          fi
+
+          # --------------------------------------------------------------------
+          # 2. Rotate WordPress Salts
+          # --------------------------------------------------------------------
+          if [ "${{ github.event.inputs.rotate_wp_salts }}" = "true" ]; then
+            echo "--- Rotating WordPress salts for $ENV (WARNING: Logs out all users) ---"
+            
+            # Generate new random salts
+            SALTS_JSON_STRING=$(jq -n \
+              --arg ak "$(openssl rand -base64 48)" \
+              --arg sak "$(openssl rand -base64 48)" \
+              --arg lik "$(openssl rand -base64 48)" \
+              --arg nk "$(openssl rand -base64 48)" \
+              --arg as "$(openssl rand -base64 48)" \
+              --arg sas "$(openssl rand -base64 48)" \
+              --arg lis "$(openssl rand -base64 48)" \
+              --arg ns "$(openssl rand -base64 48)" \
+              '{
+                "AUTH_KEY": $ak,
+                "SECURE_AUTH_KEY": $sak,
+                "LOGGED_IN_KEY": $lik,
+                "NONCE_KEY": $nk,
+                "AUTH_SALT": $as,
+                "SECURE_AUTH_SALT": $sas,
+                "LOGGED_IN_SALT": $lis,
+                "NONCE_SALT": $ns
+              }')
+
+            aws secretsmanager put-secret-value \
+              --secret-id "acmelabs-website-${ENV}-wordpress-salts" \
+              --secret-string "$SALTS_JSON_STRING" \
+              --region "$AWS_REGION"
+            echo "WordPress salts rotated for $ENV."
+          fi
+
+          # --------------------------------------------------------------------
+          # 3. Update PagerDuty URL
+          # --------------------------------------------------------------------
+          if [ "${{ github.event.inputs.update_pagerduty_url }}" = "true" ]; then
+            if [ -z "${{ github.event.inputs.pagerduty_url_value }}" ]; then
+              echo "::error::PagerDuty URL not provided. Cannot update secret." >&2
+              exit 1
+            fi
+            echo "--- Updating PagerDuty URL for $ENV ---"
+            aws secretsmanager put-secret-value \
+              --secret-id "acmelabs-website-${ENV}-pagerduty-url" \
+              --secret-string "${{ github.event.inputs.pagerduty_url_value }}" \
+              --region "$AWS_REGION"
+            echo "PagerDuty URL updated for $ENV."
+          fi
+
+          echo "--- Secret/Key Operations Complete. ---"
